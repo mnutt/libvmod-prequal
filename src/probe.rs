@@ -5,6 +5,7 @@ use std::sync::Mutex;
 use crate::backend::Backend;
 
 const PROBE_TABLE_SIZE: usize = 16;
+const MAX_USES_BEFORE_EXPIRE: usize = 3;
 
 #[derive(Debug)]
 pub struct ProbeResult {
@@ -31,7 +32,7 @@ impl ProbeResult {
     }
 
     pub fn is_expired(&self) -> bool {
-        self.used_count.load(Ordering::SeqCst) >= super::MAX_USES_BEFORE_EXPIRE
+        self.used_count.load(Ordering::SeqCst) >= MAX_USES_BEFORE_EXPIRE
     }
 }
 
