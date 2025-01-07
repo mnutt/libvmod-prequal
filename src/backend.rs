@@ -96,27 +96,23 @@ mod tests {
     use varnish::ffi::{VCL_IP, VRT_ENDPOINT_MAGIC, backend, vrt_endpoint, suckaddr};
     use super::*;
 
-    const SUCKADDR_SIZE: usize = 128;
-    const VSA_MAGIC: u32 = 0x4b1e9335;
-
-    #[repr(C)]
-    struct TestSuckaddr {
-        magic: u32,
-        data: [u8; SUCKADDR_SIZE - size_of::<u32>()],
-    }
-
-    fn create_test_backend(name: &str, addr: SocketAddr) -> VCL_BACKEND {
-        // Allocate and leak the strings
-        let name_cstr = CString::new(name).unwrap();
-        let name_ptr = name_cstr.into_raw();
-
-        // Create suckaddr from SocketAddr
+    // Normally we could use varnish helper functions to create a suckaddr,
+    // but we can't link against varnishd.
+    fn create_test_vcl_ip(addr: SocketAddr) -> VCL_IP {
+        const SUCKADDR_SIZE: usize = 128;
+        const VSA_MAGIC: u32 = 0x4b1e9335;
+    
+        #[repr(C)]
+        struct TestSuckaddr {
+            magic: u32,
+            data: [u8; SUCKADDR_SIZE - size_of::<u32>()],
+        }
+        
         let mut test_addr = Box::new(TestSuckaddr {
             magic: VSA_MAGIC,
             data: [0; SUCKADDR_SIZE - size_of::<u32>()],
         });
 
-        // Set up the sockaddr fields
         unsafe {
             let bytes = test_addr.data.as_mut_ptr();
             match addr {
@@ -138,20 +134,35 @@ mod tests {
 
         let suckaddr: Box<suckaddr> = unsafe { std::mem::transmute(test_addr) };
 
+        VCL_IP(Box::into_raw(suckaddr) as *const _)
+    }
+
+    fn create_test_vrt_endpoint(addr: SocketAddr) -> *mut vrt_endpoint {
+        let vcl_ip = create_test_vcl_ip(addr);
+
         let endpoint = Box::new(vrt_endpoint {
             magic: VRT_ENDPOINT_MAGIC,
-            ipv4: VCL_IP(Box::into_raw(suckaddr) as *const _),
+            ipv4: vcl_ip,
             ipv6: VCL_IP(ptr::null()),
             uds_path: ptr::null(),
             preamble: ptr::null(),
         });
-        let endpoint_ptr = Box::into_raw(endpoint);
+
+        Box::into_raw(endpoint)
+    }
+
+    fn create_test_backend(name: &str, addr: SocketAddr) -> VCL_BACKEND {
+        // Allocate and leak the strings
+        let name_cstr = CString::new(name).unwrap();
+        let name_ptr = name_cstr.into_raw();
+
+        let endpoint = create_test_vrt_endpoint(addr);
 
         // Create the backend structure
         let backend = Box::new(backend {
             magic: BACKEND_MAGIC,
             n_conn: 0,
-            endpoint: endpoint_ptr,
+            endpoint: endpoint,
             vcl_name: name_ptr,
             hosthdr: name_ptr,
             authority: ptr::null_mut(),
@@ -195,5 +206,45 @@ mod tests {
         let parsed = Backend::new(backend).unwrap();
         assert_eq!(parsed.name, "test1");
         assert_eq!(parsed.address, addr);
+    }
+
+    #[test]
+    fn test_backend_parsing_invalid_backend() {
+        let name_cstr = CString::new("test1").unwrap();
+        let name_ptr = name_cstr.into_raw();
+
+        let director = Box::new(varnish::ffi::director {
+            magic: DIRECTOR_MAGIC,
+            priv_: name_ptr as *mut c_void,
+            vcl_name: name_ptr, // this is wrong
+            vdir: ptr::null_mut(),
+            mtx: ptr::null_mut(),
+        });
+        let director_ptr = Box::into_raw(director);
+        let backend = VCL_BACKEND(director_ptr);
+
+        let result = Backend::new(backend);
+
+        assert!(matches!(result, Err(BackendError::InvalidBackendMagic)));
+    }
+
+    #[test]
+    fn test_backend_parsing_invalid_director() {
+        let name_cstr = CString::new("test1").unwrap();
+        let name_ptr = name_cstr.into_raw();
+
+        let director = Box::new(varnish::ffi::director {
+            magic: 0,
+            priv_: ptr::null_mut(),
+            vcl_name: name_ptr, // this is wrong
+            vdir: ptr::null_mut(),
+            mtx: ptr::null_mut(),
+        });
+        let director_ptr = Box::into_raw(director);
+        let backend = VCL_BACKEND(director_ptr);
+
+        let result = Backend::new(backend);
+
+        assert!(matches!(result, Err(BackendError::InvalidDirectorMagic)));
     }
 }
