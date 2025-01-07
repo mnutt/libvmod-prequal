@@ -32,49 +32,67 @@ pub enum BackendError {
     InvalidAddress,
 }
 
+impl std::fmt::Display for BackendError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BackendError::InvalidBackendMagic => write!(f, "Invalid backend magic number"),
+            BackendError::InvalidDirectorMagic => write!(f, "Invalid director magic number"),
+            BackendError::InvalidAddress => write!(f, "Invalid or missing backend address"),
+        }
+    }
+}
+
+impl std::error::Error for BackendError {}
+
 impl Backend {
     pub fn new(backend_director: VCL_BACKEND) -> Result<Self, BackendError> {
         unsafe {            
-            if (*backend_director.0).magic != DIRECTOR_MAGIC {
+            // Validate director first
+            let director = backend_director.0.as_ref()
+                .ok_or(BackendError::InvalidDirectorMagic)?;
+            if director.magic != DIRECTOR_MAGIC {
                 return Err(BackendError::InvalidDirectorMagic);
             }
 
-            let backend = (*backend_director.0).priv_ as *const backend;            
-
-            if (*backend).magic != BACKEND_MAGIC {
-               return Err(BackendError::InvalidBackendMagic);
+            // Then validate backend
+            let backend = (director.priv_ as *const backend)
+                .as_ref()
+                .ok_or(BackendError::InvalidBackendMagic)?;
+            if backend.magic != BACKEND_MAGIC {
+                return Err(BackendError::InvalidBackendMagic);
             }
 
-            let name = Self::name_from_backend(backend);
-            let address = Self::address_from_backend(backend)?;
-                
             Ok(Self {
-                name,
-                address,
+                name: Self::name_from_backend(backend),
+                address: Self::address_from_backend(backend)?,
                 vcl_backend: backend_director,
             })
         }
     }
 
-    fn name_from_backend(backend: *const backend) -> String {
+    fn name_from_backend(backend: &backend) -> String {
         unsafe {
-            let name_ptr = (*backend).vcl_name;
-            if !name_ptr.is_null() {
-                CStr::from_ptr(name_ptr)
+            if !backend.vcl_name.is_null() {
+                CStr::from_ptr(backend.vcl_name)
                     .to_str()
                     .map(String::from)
-                    .unwrap_or_else(|_| format!("backend_{}", rand::random::<u32>()))
+                    .unwrap_or_else(|_| Self::generate_random_name())
             } else {
-                format!("backend_{}", rand::random::<u32>())
+                Self::generate_random_name()
             }
         }
     }
 
-    fn address_from_backend(backend: *const backend) -> Result<SocketAddr, BackendError> {
+    // We should always have a valid name, but if we don't, generate a random one
+    fn generate_random_name() -> String {
+        format!("backend_{}", rand::random::<u32>())
+    }
+
+    fn address_from_backend(backend: &backend) -> Result<SocketAddr, BackendError> {
         unsafe {
-            let endpoint = *(*backend).endpoint;
-            Ok(Option::<SocketAddr>::from(endpoint.ipv4)
-                .ok_or(BackendError::InvalidAddress)?)
+            let endpoint = (*backend.endpoint).ipv4;
+            Option::<SocketAddr>::from(endpoint)
+                .ok_or(BackendError::InvalidAddress)
         }
     }
 }
@@ -117,11 +135,11 @@ mod tests {
             let bytes = test_addr.data.as_mut_ptr();
             match addr {
                 SocketAddr::V4(addr4) => {
-                    *bytes.add(0) = 4;              // len
-                    *bytes.add(1) = 2;              // AF_INET
+                    *bytes.add(0) = 4;                             // length of address
+                    *bytes.add(1) = 2;                             // AF_INET
                     let port = addr4.port();
-                    *bytes.add(2) = ((port & 0xFF00) >> 8) as u8;  // High byte
-                    *bytes.add(3) = (port & 0xFF) as u8;           // Low byte
+                    *bytes.add(2) = ((port & 0xFF00) >> 8) as u8;  // High byte of port
+                    *bytes.add(3) = (port & 0xFF) as u8;           // Low byte of port
                     let octets = addr4.ip().octets();
                     *bytes.add(4) = octets[0];
                     *bytes.add(5) = octets[1];
@@ -248,3 +266,4 @@ mod tests {
         assert!(matches!(result, Err(BackendError::InvalidDirectorMagic)));
     }
 }
+

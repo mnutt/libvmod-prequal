@@ -7,7 +7,6 @@ use crate::backend::Backend;
 use crate::probe::{ProbeTable, ProbeResult};
 
 use varnish::ffi::VCL_BACKEND;
-use varnish::vcl::VclError;
 
 const PROBE_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -83,13 +82,12 @@ impl Director {
     /// * `Ok(())` if the backend was added successfully
     /// * `Err(DirectorError)` if the backend could not be added
     pub fn add_backend(&self, backend: Backend) -> Result<(), DirectorError> {
-        if let Ok(mut backends) = self.backends.lock() {
-            backends.push(backend);
-            let _ = self.probe_trigger.send(());
-            Ok(())
-        } else {
-            Err(DirectorError::BackendLockError("Failed to lock backends".to_string()))
-        }        
+        let mut backends = self.backends.lock()
+            .map_err(|e| DirectorError::BackendLockError(e.to_string()))?;
+        
+        backends.push(backend);
+        let _ = self.probe_trigger.send(());
+        Ok(())
     }
 
     /// Removes a backend from the pool by its VCL_BACKEND reference.
@@ -100,12 +98,11 @@ impl Director {
     pub fn remove_backend(&self, vcl_backend: VCL_BACKEND) {
         if let Ok(mut backends) = self.backends.lock() {
             if let Some(backend) = backends.iter()
-                .find(|b| b.vcl_backend.0 == vcl_backend.0)
+                .find(|b| **b == vcl_backend)
                 .cloned() 
             {
                 self.probe_table.remove_backend(backend);
-                
-                backends.retain(|b| b.vcl_backend.0 != vcl_backend.0);
+                backends.retain(|b| *b != vcl_backend);
             }
         }
     }
@@ -125,20 +122,20 @@ impl Director {
     /// # Returns
     /// * `Ok(VCL_BACKEND)` - The selected backend
     /// * `Err(VclError)` - If no backends are available
-    pub fn get_backend(&self) -> Result<Backend, VclError> {
+    pub fn get_backend(&self) -> Result<Backend, DirectorError> {
         let backends = self.backends.lock().unwrap();
         if backends.is_empty() {
-            return Err(VclError::new("No backends available".to_string()));
+            return Err(DirectorError::BackendLockError("No backends available".to_string()));
         }
 
         let _ = self.probe_trigger.send(());
 
         if let Some(backend) = self.probe_table.find_best() {
-            return Ok(backend);
+            Ok(backend)
+        } else {
+            // Fallback: random selection
+            Ok(backends[rand::random::<usize>() % backends.len()].clone())
         }
-
-        // Fallback: random selection
-        Ok(backends[rand::random::<usize>() % backends.len()].clone())
     }
 
     /// Constructs a probe request for a backend.

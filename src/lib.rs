@@ -13,6 +13,7 @@ use backend::Backend;
 use varnish::ffi::VCL_BACKEND;
 use varnish::vcl::{Ctx, VclError, LogTag};
 
+// director is a very thin wrapper around a Director, to expose it to VCL
 #[allow(non_camel_case_types)]
 pub struct director {
     inner: Arc<Director>,
@@ -78,7 +79,7 @@ mod prequal {
         pub unsafe fn backend(&self, ctx: &mut Ctx) -> Result<VCL_BACKEND, VclError> {
             self.log_probes(ctx); // just for now, for debugging
 
-            let backend = self.inner.get_backend()?;
+            let backend = self.inner.get_backend().map_err(|e| VclError::new(format!("Failed to get backend: {:?}", e)))?;
             Ok(backend.vcl_backend)
         }
 
