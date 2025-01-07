@@ -8,7 +8,21 @@ use varnish::ffi::{VCL_BACKEND, BACKEND_MAGIC, DIRECTOR_MAGIC, backend};
 pub struct Backend {
     pub(crate) name: String,
     pub(crate) address: SocketAddr,
-    pub(crate) backend: VCL_BACKEND,
+    pub(crate) vcl_backend: VCL_BACKEND,
+}
+
+impl PartialEq for Backend {
+    fn eq(&self, other: &Self) -> bool {
+        self.vcl_backend.0 == other.vcl_backend.0
+    }
+}
+
+impl Eq for Backend {}
+
+impl PartialEq<VCL_BACKEND> for Backend {
+    fn eq(&self, other: &VCL_BACKEND) -> bool {
+        self.vcl_backend.0 == other.0
+    }
 }
 
 #[derive(Debug)]
@@ -37,7 +51,7 @@ impl Backend {
             Ok(Self {
                 name,
                 address,
-                backend: backend_director,
+                vcl_backend: backend_director,
             })
         }
     }

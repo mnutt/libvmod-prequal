@@ -1,18 +1,18 @@
 mod backend;
+mod probe;
 
-use backend::{Backend};
+use backend::Backend;
+use probe::{ProbeTable, ProbeResult};
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration};
 
 use rand::seq::IteratorRandom;
 use varnish::ffi::{VCL_BACKEND};
 use varnish::vcl::{Ctx, VclError, LogTag};
 
-const PROBE_TABLE_SIZE: usize = 16;
 const PROBE_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_USES_BEFORE_EXPIRE: usize = 3;
 
@@ -30,102 +30,6 @@ impl std::fmt::Display for DirectorError {
 }
 
 impl std::error::Error for DirectorError {}
-
-
-#[derive(Debug)]
-struct ProbeResult {
-    timestamp: SystemTime,
-    in_flight: usize,
-    est_latency: usize,
-    used_count: AtomicUsize,
-    backend: Backend,
-}
-
-impl ProbeResult {
-    fn new(in_flight: usize, est_latency: usize, backend: Backend) -> Self {
-        Self {
-            timestamp: SystemTime::now(),
-            in_flight,
-            est_latency,
-            used_count: AtomicUsize::new(0),
-            backend,
-        }
-    }
-
-    fn increment_used(&self) -> usize {
-        self.used_count.fetch_add(1, Ordering::SeqCst) + 1
-    }
-
-    fn is_expired(&self) -> bool {
-        self.used_count.load(Ordering::SeqCst) >= MAX_USES_BEFORE_EXPIRE
-    }
-}
-
-impl Clone for ProbeResult {
-    fn clone(&self) -> Self {
-        Self {
-            timestamp: self.timestamp,
-            in_flight: self.in_flight,
-            est_latency: self.est_latency,
-            used_count: AtomicUsize::new(self.used_count.load(Ordering::SeqCst)),
-            backend: self.backend.clone(),
-        }
-    }
-}
-
-#[derive(Debug)]
-struct ProbeTable {
-    results: Mutex<Vec<Option<ProbeResult>>>,
-    next_index: AtomicUsize,
-}
-
-impl ProbeTable {
-    fn new() -> Self {
-        Self {
-            results: Mutex::new(vec![None; PROBE_TABLE_SIZE]),
-            next_index: AtomicUsize::new(0),
-        }
-    }
-
-    fn add_result(&self, result: ProbeResult) {
-        let idx = self.next_index.fetch_add(1, Ordering::SeqCst) % PROBE_TABLE_SIZE;
-        if let Ok(mut results) = self.results.lock() {
-            results[idx] = Some(result);
-            self.next_index.store(idx, Ordering::SeqCst);
-        }
-    }
-
-    fn find_best(&self) -> Option<VCL_BACKEND> {
-        let mut results = self.results.lock().ok()?;
-        
-        // Find the best non-expired probe
-        let best_idx = results.iter()
-            .enumerate()
-            .filter_map(|(idx, probe)| {
-                probe.as_ref().map(|p| (idx, p))
-            })
-            .filter(|(_, probe)| !probe.is_expired())
-            .min_by_key(|(_, probe)| probe.in_flight)
-            .map(|(idx, _)| idx)?;
-
-        let probe = results[best_idx].as_mut()?;
-        probe.increment_used();
-        
-        Some(probe.backend.backend)
-    }
-
-    fn remove_backend(&self, backend: VCL_BACKEND) {
-        if let Ok(mut results) = self.results.lock() {
-            for probe in results.iter_mut() {
-                if let Some(p) = probe {
-                    if p.backend.backend.0 == backend.0 {
-                        *probe = None;
-                    }
-                }
-            }
-        }
-    }
-}
 
 struct DirectorInner {
     backends: Mutex<Vec<Backend>>,
@@ -176,11 +80,23 @@ impl DirectorInner {
         }        
     }
 
-    fn remove_backend(&self, backend: VCL_BACKEND) {
+    fn remove_backend(&self, vcl_backend: VCL_BACKEND) {
         if let Ok(mut backends) = self.backends.lock() {
-            backends.retain(|b| b.backend.0 != backend.0);
+            if let Some(backend) = backends.iter()
+                .find(|b| b.vcl_backend.0 == vcl_backend.0)
+                .cloned() 
+            {
+                self.probe_table.remove_backend(backend);
+                
+                backends.retain(|b| b.vcl_backend.0 != vcl_backend.0);
+            }
         }
-        self.probe_table.remove_backend(backend);
+    }
+    
+    fn log_probe_table(&self, ctx: &mut Ctx) {
+        if let Some(table) = self.probe_table.display_results() {
+            ctx.log(LogTag::Debug, &format!("Probe table state:{}", table));
+        }
     }
 
     fn get_backend(&self, ctx: &mut Ctx) -> Result<VCL_BACKEND, VclError> {
@@ -189,31 +105,16 @@ impl DirectorInner {
             return Err(VclError::new("No backends available".to_string()));
         }
 
-        ctx.log(LogTag::Error, "probe table state");
-
-        // Log the probe table state
-        if let Ok(results) = self.probe_table.results.lock() {
-            for (idx, probe) in results.iter().enumerate() {
-                if let Some(probe) = probe {
-                    ctx.log(LogTag::Error, format!(
-                        "probe[{}]: backend={}, in_flight={}, latency={}",
-                        idx,
-                        probe.backend,
-                        probe.in_flight,
-                        probe.est_latency
-                    ));
-                }
-            }
-        }
+        self.log_probe_table(ctx);
 
         let _ = self.probe_trigger.send(());
 
         if let Some(backend) = self.probe_table.find_best() {
-            return Ok(backend);
+            return Ok(backend.vcl_backend);
         }
 
         // Fallback: random selection
-        Ok(backends[rand::random::<usize>() % backends.len()].backend)
+        Ok(backends[rand::random::<usize>() % backends.len()].vcl_backend)
     }
 
     fn construct_probe_request(&self, backend: &Backend) -> ureq::Request {
@@ -239,11 +140,9 @@ impl DirectorInner {
                 match request.call() {
                     Ok(response) => {
                         if response.status() != 200 {
-                            // probe failed
                             continue;
                         }
 
-                        // Get required headers, skip if any are missing
                         let in_flight = match response
                             .header("X-In-Flight")
                             .and_then(|s| s.parse::<usize>().ok()) {
@@ -262,7 +161,6 @@ impl DirectorInner {
                             .add_result(ProbeResult::new(in_flight, est_latency, backend.clone()));
                     },
                     Err(_) => {
-                        // probe failed
                         continue;
                     }
                 }
@@ -272,11 +170,7 @@ impl DirectorInner {
 
     fn is_healthy(&self) -> bool {
         // Only healthy if we have valid probe results
-        self.probe_table
-            .results
-            .lock()
-            .map(|results| results.iter().any(|p| p.is_some()))
-            .unwrap_or(false)
+        self.probe_table.has_probes()
     }
 }
 
@@ -337,7 +231,7 @@ mod tests {
         backend::Backend {
             name: name.to_string(),
             address: addr,
-            backend: VCL_BACKEND(director_id as *const director), // fake VCL_BACKEND reference
+            vcl_backend: VCL_BACKEND(director_id as *const director), // fake VCL_BACKEND reference
         }
     }
 
