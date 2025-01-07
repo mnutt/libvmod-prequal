@@ -1,102 +1,36 @@
-use std::marker::Send;
+mod backend;
+
+use backend::{Backend};
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime};
-use std::fmt;
-use std::ffi::CStr;
-use std::ffi::CString;
-use std::net::SocketAddr;
 
 use rand::seq::IteratorRandom;
-use varnish::ffi::{VCL_BACKEND, BACKEND_MAGIC, DIRECTOR_MAGIC, backend};
+use varnish::ffi::{VCL_BACKEND};
 use varnish::vcl::{Ctx, VclError, LogTag};
 
 const PROBE_TABLE_SIZE: usize = 16;
 const PROBE_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_USES_BEFORE_EXPIRE: usize = 3;
 
-#[derive(Debug, Clone)]
-struct Backend {
-    name: String,
-    address: SocketAddr,
-    backend: VCL_BACKEND,
-}
-
 #[derive(Debug)]
-pub enum BackendError {
-    InvalidBackendMagic,
-    InvalidDirectorMagic,
-    NoProbe,
-    InvalidProbe,
-    NoProbeURL,
-    InvalidProbeURL,
-    InvalidAddress,
-    InvalidEndpoint,
+pub enum DirectorError {
+    BackendLockError(String),
 }
 
-impl Backend {
-    fn new(backend_director: VCL_BACKEND) -> Result<Self, BackendError> {
-        unsafe {            
-            if (*backend_director.0).magic != DIRECTOR_MAGIC {
-                return Err(BackendError::InvalidDirectorMagic);
-            }
-
-            let backend = (*backend_director.0).priv_ as *const backend;            
-
-            // While directors typically allow any director as a backend, we want to make sure
-            // we are only dealing with real backends
-            if (*backend).magic != BACKEND_MAGIC {
-               return Err(BackendError::InvalidBackendMagic);
-            }
-
-            let name = Self::name_from_backend(backend);
-            let address = Self::address_from_backend(backend)?;
-                
-            Ok(Self {
-                name,
-                address,
-                backend: backend_director,
-            })
-        }
-    }
-
-    fn name_from_backend(backend: *const backend) -> String {
-        unsafe {
-            let name_ptr = (*backend).vcl_name;
-            if !name_ptr.is_null() {
-                CStr::from_ptr(name_ptr)
-                    .to_str()
-                    .map(String::from)
-                    .unwrap_or_else(|_| format!("backend_{}", rand::random::<u32>()))
-            } else {
-                format!("backend_{}", rand::random::<u32>())
-            }
-        }
-    }
-
-    fn address_from_backend(backend: *const backend) -> Result<SocketAddr, BackendError> {
-        //#[cfg(test)]
-        //return Ok(SocketAddr::from(([127, 0, 0, 1], 8080)));
-
-        unsafe {
-            let endpoint = *(*backend).endpoint;
-            Ok(Option::<SocketAddr>::from(endpoint.ipv4)
-                .ok_or(BackendError::InvalidAddress)?)
+impl std::fmt::Display for DirectorError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DirectorError::BackendLockError(msg) => write!(f, "Backend lock error: {}", msg),
         }
     }
 }
 
-impl fmt::Display for Backend {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.name)
-    }
-}
+impl std::error::Error for DirectorError {}
 
-// Update safety implementations
-unsafe impl Send for Backend {}
-unsafe impl Sync for Backend {}
 
 #[derive(Debug)]
 struct ProbeResult {
@@ -174,7 +108,6 @@ impl ProbeTable {
             .min_by_key(|(_, probe)| probe.in_flight)
             .map(|(idx, _)| idx)?;
 
-        // Get the probe and increment its usage
         let probe = results[best_idx].as_mut()?;
         probe.increment_used();
         
@@ -198,6 +131,7 @@ struct DirectorInner {
     backends: Mutex<Vec<Backend>>,
     probe_table: ProbeTable,
     probe_trigger: Sender<()>,
+    probe_path: Mutex<String>,
 }
 
 impl DirectorInner {
@@ -208,6 +142,7 @@ impl DirectorInner {
             backends: Mutex::new(Vec::new()),
             probe_table: ProbeTable::new(),
             probe_trigger: tx,
+            probe_path: Mutex::new("/probe".to_string()),
         });
 
         let probe_loop = {
@@ -225,19 +160,123 @@ impl DirectorInner {
         (inner, probe_loop)
     }
 
+    fn set_probe_path(&self, path: &str) {
+        if let Ok(mut probe_path) = self.probe_path.lock() {
+            *probe_path = path.to_string();
+        }
+    }
+
+    fn add_backend(&self, backend: backend::Backend) -> Result<(), DirectorError> {
+        if let Ok(mut backends) = self.backends.lock() {
+            backends.push(backend);
+            let _ = self.probe_trigger.send(());
+            Ok(())
+        } else {
+            Err(DirectorError::BackendLockError("Failed to lock backends".to_string()))
+        }        
+    }
+
+    fn remove_backend(&self, backend: VCL_BACKEND) {
+        if let Ok(mut backends) = self.backends.lock() {
+            backends.retain(|b| b.backend.0 != backend.0);
+        }
+        self.probe_table.remove_backend(backend);
+    }
+
+    fn get_backend(&self, ctx: &mut Ctx) -> Result<VCL_BACKEND, VclError> {
+        let backends = self.backends.lock().unwrap();
+        if backends.is_empty() {
+            return Err(VclError::new("No backends available".to_string()));
+        }
+
+        ctx.log(LogTag::Error, "probe table state");
+
+        // Log the probe table state
+        if let Ok(results) = self.probe_table.results.lock() {
+            for (idx, probe) in results.iter().enumerate() {
+                if let Some(probe) = probe {
+                    ctx.log(LogTag::Error, format!(
+                        "probe[{}]: backend={}, in_flight={}, latency={}",
+                        idx,
+                        probe.backend,
+                        probe.in_flight,
+                        probe.est_latency
+                    ));
+                }
+            }
+        }
+
+        let _ = self.probe_trigger.send(());
+
+        if let Some(backend) = self.probe_table.find_best() {
+            return Ok(backend);
+        }
+
+        // Fallback: random selection
+        Ok(backends[rand::random::<usize>() % backends.len()].backend)
+    }
+
+    fn construct_probe_request(&self, backend: &Backend) -> ureq::Request {
+        let probe_path = self.probe_path.lock()
+            .map(|p| p.clone())
+            .unwrap_or_else(|_| "/probe".to_string());
+
+        let url = format!("http://{}{}", backend.address, probe_path);
+        ureq::get(&url)
+            .timeout(Duration::from_secs(5))
+            .set("Host", &backend.name)
+    }
+
     fn probe_backends(&self) {
         if let Ok(backends) = self.backends.lock() {
             let mut rng = rand::thread_rng();
             let selected = (0..backends.len()).choose_multiple(&mut rng, 3);
 
             for &idx in &selected {
-                // TODO: Implement actual probe request logic
-                let in_flight = rand::random::<usize>() % 100;
-                let est_latency = rand::random::<usize>() % 1000;
-                self.probe_table
-                    .add_result(ProbeResult::new(in_flight, est_latency, backends[idx].clone()));
+                let backend = &backends[idx];
+                let request = self.construct_probe_request(backend);
+
+                match request.call() {
+                    Ok(response) => {
+                        if response.status() != 200 {
+                            // probe failed
+                            continue;
+                        }
+
+                        // Get required headers, skip if any are missing
+                        let in_flight = match response
+                            .header("X-In-Flight")
+                            .and_then(|s| s.parse::<usize>().ok()) {
+                                Some(val) => val,
+                                None => continue,
+                        };
+
+                        let est_latency = match response
+                            .header("X-Estimated-Latency")
+                            .and_then(|s| s.parse::<usize>().ok()) {
+                                Some(val) => val,
+                                None => continue,
+                        };
+
+                        self.probe_table
+                            .add_result(ProbeResult::new(in_flight, est_latency, backend.clone()));
+                    },
+                    Err(_) => {
+                        // probe failed
+                        continue;
+                    }
+                }
             }
         }
+    }
+
+    fn is_healthy(&self) -> bool {
+        // Only healthy if we have valid probe results
+        self.probe_table
+            .results
+            .lock()
+            .map(|results| results.iter().any(|p| p.is_some()))
+            .unwrap_or(false)
     }
 }
 
@@ -251,236 +290,81 @@ mod prequal {
     use super::*;
 
     impl director {
-        /// Create a new director
-        ///
-        /// This starts a background thread that periodically probes backends to determine their load.
-        /// The thread will automatically clean up when the director is dropped.
         pub fn new(_ctx: &mut Ctx) -> Result<Self, VclError> {
             let (inner, probe_loop) = DirectorInner::new();
             thread::spawn(probe_loop);
             Ok(Self { inner })
         }
 
-        /// Add a backend to the director's pool
-        ///
-        /// The backend will be included in future probe operations and can be selected
-        /// for request handling.
-        pub fn add_backend(&self, backend: VCL_BACKEND) -> Result<(), VclError> {
-            match Backend::new(backend) {
+        pub fn set_probe_path(&self, path: &str) {
+            self.inner.set_probe_path(path);
+        }
+
+        pub fn add_backend(&self, vcl_backend: VCL_BACKEND) -> Result<(), VclError> {
+            match Backend::new(vcl_backend) {
                 Ok(backend) => {
-                    if let Ok(mut backends) = self.inner.backends.lock() {
-                        backends.push(backend);
-                    }
-                    let _ = self.inner.probe_trigger.send(());
-                    Ok(())
+                    self.inner.add_backend(backend).map_err(|e| VclError::new(format!("Failed to add backend: {:?}", e)))
                 }
-                Err(e) => Err(VclError::new(format!("Invalid backend: {:?}", e)))
+                Err(e) => {
+                    return Err(VclError::new(format!("Invalid backend: {:?}", e)));
+                }
             }
         }
 
-        /// Remove a backend from the director's pool
-        ///
-        /// The backend will no longer be considered for request handling.
-        /// Any existing probe results for this backend will be allowed to expire naturally.
         pub fn remove_backend(&self, backend: VCL_BACKEND) {
-            if let Ok(mut backends) = self.inner.backends.lock() {
-                backends.retain(|b| b.backend.0 != backend.0);
-            }
-            self.inner.probe_table.remove_backend(backend);
+            self.inner.remove_backend(backend)
         }
 
-        /// Get the next backend for request handling
-        ///
-        /// # Safety
-        ///
-        /// This method is unsafe because:
-        /// - It returns a raw pointer to a Varnish director (VCL_BACKEND)
-        /// - Must only be called from within a Varnish VCL context
         pub unsafe fn backend(&self, ctx: &mut Ctx) -> Result<VCL_BACKEND, VclError> {
-            let backends = self.inner.backends.lock().unwrap();
-            if backends.is_empty() {
-                return Err(VclError::new("No backends available".to_string()));
-            }
-
-            ctx.log(LogTag::Error, "probe table state");
-
-            // Log the probe table state
-            if let Ok(results) = self.inner.probe_table.results.lock() {
-                for (idx, probe) in results.iter().enumerate() {
-                    if let Some(probe) = probe {
-                        ctx.log(LogTag::Error, format!(
-                            "probe[{}]: backend={}, in_flight={}, latency={}",
-                            idx,
-                            probe.backend,
-                            probe.in_flight,
-                            probe.est_latency
-                        ));
-                    }
-                }
-            }
-
-            let _ = self.inner.probe_trigger.send(());
-
-            // find_best now handles usage tracking
-            if let Some(backend) = self.inner.probe_table.find_best() {
-                return Ok(backend);
-            }
-
-            // Fallback: random selection
-            Ok(backends[rand::random::<usize>() % backends.len()].backend)
+            self.inner.get_backend(ctx)
         }
 
         pub fn healthy(&self, _ctx: &mut Ctx) -> bool {
-            // Only healthy if we have valid probe results
-            self.inner
-                .probe_table
-                .results
-                .lock()
-                .map(|results| results.iter().any(|p| p.is_some()))
-                .unwrap_or(false)
+            self.inner.is_healthy()
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::ptr;
-    use varnish::vcl::TestCtx;
-    use varnish::ffi::{VCL_IP, VRT_ENDPOINT_MAGIC, backend, vrt_endpoint, suckaddr};
-    use std::ffi::c_void;
     use super::*;
+    use varnish::ffi::{VCL_BACKEND, director};   
+    use std::net::SocketAddr;
     
     varnish::run_vtc_tests!("tests/*.vtc");
 
-    // Size of suckaddr - large enough for both IPv4 and IPv6
-    const SUCKADDR_SIZE: usize = 128;
-    const VSA_MAGIC: u32 = 0x4b1e9335;
-
-    // Our test-specific suckaddr implementation
-    #[repr(C)]
-    struct TestSuckaddr {
-        magic: u32,
-        data: [u8; SUCKADDR_SIZE - size_of::<u32>()],  // Reduced to account for magic number
-    }
-
-    fn create_suckaddr(addr: SocketAddr) -> Box<suckaddr> {
-        let mut test_addr = Box::new(TestSuckaddr {
-            magic: VSA_MAGIC,
-            data: [0; SUCKADDR_SIZE - size_of::<u32>()],
-        });
-
-        // Set up the sockaddr fields
-        unsafe {
-            let bytes = test_addr.data.as_mut_ptr();
-            match addr {
-                SocketAddr::V4(addr4) => {
-                    *bytes.add(0) = 4;              // len
-                    *bytes.add(1) = 2;              // AF_INET
-                    // Port needs to be in network byte order (big-endian)
-                    let port = addr4.port();
-                    *bytes.add(2) = ((port & 0xFF00) >> 8) as u8;  // High byte
-                    *bytes.add(3) = (port & 0xFF) as u8;           // Low byte
-                    let octets = addr4.ip().octets();
-                    *bytes.add(4) = octets[0];
-                    *bytes.add(5) = octets[1];
-                    *bytes.add(6) = octets[2];
-                    *bytes.add(7) = octets[3];
-                },
-                SocketAddr::V6(_) => todo!("IPv6 support"),
-            }
+    fn create_test_backend(name: &str, addr: SocketAddr, director_id: u32) -> backend::Backend {
+        backend::Backend {
+            name: name.to_string(),
+            address: addr,
+            backend: VCL_BACKEND(director_id as *const director), // fake VCL_BACKEND reference
         }
-
-        unsafe { std::mem::transmute(test_addr) }
-    }
-
-    fn create_test_backend(name: &str, addr: SocketAddr) -> VCL_BACKEND {
-        // Allocate and leak the strings
-        let name_cstr = CString::new(name).unwrap();
-        let name_ptr = name_cstr.into_raw();
-
-        // Create suckaddr from SocketAddr
-        let suckaddr = create_suckaddr(addr);
-
-        let endpoint = Box::new(vrt_endpoint {
-            magic: VRT_ENDPOINT_MAGIC,
-            ipv4: VCL_IP(Box::into_raw(suckaddr) as *const _),
-            ipv6: VCL_IP(ptr::null()),
-            uds_path: ptr::null(),
-            preamble: ptr::null(),
-        });
-        let endpoint_ptr = Box::into_raw(endpoint);
-
-        // Create the backend structure
-        let backend = Box::new(backend {
-            magic: BACKEND_MAGIC,
-            n_conn: 0,
-            endpoint: endpoint_ptr,
-            vcl_name: name_ptr,
-            hosthdr: name_ptr,
-            authority: ptr::null_mut(),
-            connect_timeout: varnish::ffi::vtim_dur(3.5),
-            first_byte_timeout: varnish::ffi::vtim_dur(15.0),
-            between_bytes_timeout: varnish::ffi::vtim_dur(5.0),
-            backend_wait_timeout: varnish::ffi::vtim_dur(10.0),
-            max_connections: 100,
-            proxy_header: 0,
-            backend_wait_limit: 0,
-            sick: 0,
-            changed: varnish::ffi::vtim_real(0.0),
-            probe: ptr::null_mut(),
-            vsc_seg: ptr::null_mut(),
-            vsc: ptr::null_mut(),
-            conn_pool: ptr::null_mut(),
-            director: VCL_BACKEND(ptr::null()),
-            cw_head: unsafe { std::mem::zeroed() },  // Initialize VTAILQ_HEAD
-            cw_count: 0,
-        });
-        let backend_ptr = Box::into_raw(backend);
-
-        // Create the director structure
-        let director = Box::new(varnish::ffi::director {
-            magic: 0x3336351d,
-            priv_: backend_ptr as *mut c_void,
-            vcl_name: name_ptr,
-            vdir: ptr::null_mut(),  // VCL director info - null for our use
-            mtx: ptr::null_mut(),   // Lock - null since we handle locking in Rust
-        });
-        let director_ptr = Box::into_raw(director);
-
-        VCL_BACKEND(director_ptr)
     }
 
     #[test]
     fn test_director_add_remove_backend() {
-        let mut test_ctx = TestCtx::new(1);
-        let ctx = &mut test_ctx.ctx();
-        let director = director::new(ctx).unwrap();
-
-        let addr1 = SocketAddr::from(([127, 0, 0, 1], 8080));
-        let addr2 = SocketAddr::from(([127, 0, 0, 2], 8081));
+        let (director, _) = DirectorInner::new();
         
-        let backend = create_test_backend("test1", addr1);
-        let backend2 = create_test_backend("test2", addr2);
+        let backend = create_test_backend("test1", SocketAddr::from(([127, 0, 0, 1], 8080)), 1);
+        let backend2 = create_test_backend("test2", SocketAddr::from(([127, 0, 0, 2], 8081)), 2);
 
         // Add backend and verify
         director.add_backend(backend).unwrap();
-        assert_eq!(director.inner.backends.lock().unwrap().len(), 1);
+        assert_eq!(director.backends.lock().unwrap().len(), 1);
         
         // Verify the backend name
-        assert_eq!(director.inner.backends.lock().unwrap()[0].name, "test1");
+        assert_eq!(director.backends.lock().unwrap()[0].name, "test1");
 
         // Add another backend
         director.add_backend(backend2).unwrap();
-        assert_eq!(director.inner.backends.lock().unwrap().len(), 2);
+        assert_eq!(director.backends.lock().unwrap().len(), 2);
 
         // Remove a backend
-        director.remove_backend(backend);
-        assert_eq!(director.inner.backends.lock().unwrap().len(), 1);
+        director.remove_backend(VCL_BACKEND(1 as *const director));
+        assert_eq!(director.backends.lock().unwrap().len(), 1);
 
         // Verify the remaining backend
-        assert_eq!(director.inner.backends.lock().unwrap()[0].name, "test2");
-        assert_eq!(director.inner.backends.lock().unwrap()[0].address, SocketAddr::from(([127, 0, 0, 2], 8081)));
+        assert_eq!(director.backends.lock().unwrap()[0].name, "test2");
+        assert_eq!(director.backends.lock().unwrap()[0].address, SocketAddr::from(([127, 0, 0, 2], 8081)));
     }
-
-    // Update other tests to use create_test_backend
 }

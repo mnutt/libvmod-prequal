@@ -1,13 +1,21 @@
 varnishtest "Test prequal director backend selection and health"
 
-server s00 -repeat 2 -listen 127.0.0.1:8080 {
+server s00 -repeat 12 -listen 127.0.0.1:8080 {
 	rxreq
-	txresp -body "server0"
+	expect req.url == "/probe"
+	txresp \
+		-hdr "X-In-Flight: 5" \
+		-hdr "X-Estimated-Latency: 100" \
+		-body "OK"
 } -start
 
-server s01 -repeat 10 -listen 127.0.0.1:8081 {
+server s01 -repeat 12 -listen 127.0.0.1:8081 {
 	rxreq
-	txresp -body "server1"
+	expect req.url == "/probe"
+	txresp \
+		-hdr "X-In-Flight: 10" \
+		-hdr "X-Estimated-Latency: 200" \
+		-body "OK"
 } -start
 
 varnish v1 -vcl+backend {
@@ -32,19 +40,19 @@ varnish v1 -vcl+backend {
 } -start
 
 client c1 {
-	txreq
+	txreq -url /probe
 	rxresp
 	expect resp.http.healthy == "true"
 	expect resp.status == 200
-	expect resp.body ~ "server[01]"
+	expect resp.body ~ "OK"
 } -run
 
 client c2 {
-	txreq
+	txreq -url /probe
 	rxresp
 	expect resp.http.healthy == "true"
 	expect resp.status == 200
-	expect resp.body ~ "server[01]"
+	expect resp.body ~ "OK"
 } -run
 
 # server s0 -wait
