@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use std::sync::mpsc::{channel, Sender};
 use rand::seq::IteratorRandom;
@@ -24,10 +24,10 @@ impl std::fmt::Display for DirectorError {
 impl std::error::Error for DirectorError {}
 
 pub struct Director {
-    backends: Mutex<Vec<Backend>>,
+    backends: RwLock<Vec<Backend>>,
     probe_table: ProbeTable,
     probe_trigger: Sender<()>,
-    probe_path: Mutex<String>,
+    probe_path: RwLock<String>,
 }
 
 impl Director {
@@ -40,10 +40,10 @@ impl Director {
         let (tx, rx) = channel();
 
         let inner = Arc::new(Self {
-            backends: Mutex::new(Vec::new()),
+            backends: RwLock::new(Vec::new()),
             probe_table: ProbeTable::new(),
             probe_trigger: tx,
-            probe_path: Mutex::new("/probe".to_string()),
+            probe_path: RwLock::new("/probe".to_string()),
         });
 
         let probe_loop = {
@@ -65,7 +65,7 @@ impl Director {
     /// # Arguments
     /// * `path` - The URL path to use for probe requests (e.g. "/probe")
     pub fn set_probe_path(&self, path: &str) {
-        if let Ok(mut probe_path) = self.probe_path.lock() {
+        if let Ok(mut probe_path) = self.probe_path.write() {
             *probe_path = path.to_string();
         }
     }
@@ -79,7 +79,7 @@ impl Director {
     /// * `Ok(())` if the backend was added successfully
     /// * `Err(DirectorError)` if the backend could not be added
     pub fn add_backend(&self, backend: Backend) -> Result<(), DirectorError> {
-        let mut backends = self.backends.lock()
+        let mut backends = self.backends.write()
             .map_err(|e| DirectorError::BackendLockError(e.to_string()))?;
         
         backends.push(backend);
@@ -92,7 +92,7 @@ impl Director {
     /// # Arguments
     /// * `vcl_backend` - The VCL_BACKEND reference to remove
     pub fn remove_backend(&self, vcl_backend: VCL_BACKEND) {
-        if let Ok(mut backends) = self.backends.lock() {
+        if let Ok(mut backends) = self.backends.write() {
             if let Some(backend) = backends.iter()
                 .find(|b| **b == vcl_backend)
                 .cloned() 
@@ -123,21 +123,20 @@ impl Director {
     /// * `Ok(VCL_BACKEND)` - The selected backend
     /// * `Err(VclError)` - If no backends are available
     pub fn get_backend(&self) -> Result<Backend, DirectorError> {
+        let backends = self.backends.read()
+            .map_err(|e| DirectorError::BackendLockError(e.to_string()))?;
+
+        if backends.is_empty() {
+            return Err(DirectorError::BackendLockError("No backends available".to_string()));
+        }
+
         let _ = self.probe_trigger.send(());
 
         if let Some(backend) = self.probe_table.find_best() {
             Ok(backend)
         } else {
             // Fallback: random selection
-            if let Ok(backends) = self.backends.lock() {
-                if backends.is_empty() {
-                    return Err(DirectorError::BackendLockError("No backends available".to_string()));
-                }
-    
-                Ok(backends[rand::random::<usize>() % backends.len()].clone())
-            } else {
-                Err(DirectorError::BackendLockError("Unable to lock backends".to_string()))
-            }
+            Ok(backends[rand::random::<usize>() % backends.len()].clone())
         }
     }
 
@@ -149,7 +148,7 @@ impl Director {
     /// # Returns
     /// A configured HTTP request ready to be sent
     fn construct_probe_request(&self, backend: &Backend) -> ureq::Request {
-        let probe_path = self.probe_path.lock()
+        let probe_path = self.probe_path.read()
             .map(|p| p.clone())
             .unwrap_or_else(|_| "/probe".to_string());
 
@@ -162,14 +161,12 @@ impl Director {
     /// Randomly selects and probes a subset of backends.
     /// Updates the probe table with results from successful probes.
     fn probe_backends(&self) {
-        let backends_to_probe = if let Ok(backends) = self.backends.lock() {
-            println!("Probing backends: {:?}", backends.len());
+        let backends_to_probe = if let Ok(backends) = self.backends.read() {
             let mut rng = rand::thread_rng();
             backends.iter()
-                .enumerate()
                 .choose_multiple(&mut rng, 3)
                 .into_iter()
-                .map(|(_, b)| b.clone())
+                .cloned()
                 .collect::<Vec<_>>()
         } else {
             return;
@@ -242,22 +239,22 @@ mod tests {
 
         // Add backend and verify
         director.add_backend(backend).unwrap();
-        assert_eq!(director.backends.lock().unwrap().len(), 1);
+        assert_eq!(director.backends.read().unwrap().len(), 1);
         
         // Verify the backend name
-        assert_eq!(director.backends.lock().unwrap()[0].name, "test1");
+        assert_eq!(director.backends.read().unwrap()[0].name, "test1");
 
         // Add another backend
         director.add_backend(backend2).unwrap();
-        assert_eq!(director.backends.lock().unwrap().len(), 2);
+        assert_eq!(director.backends.read().unwrap().len(), 2);
 
         // Remove a backend
         director.remove_backend(VCL_BACKEND(1 as *const director));
-        assert_eq!(director.backends.lock().unwrap().len(), 1);
+        assert_eq!(director.backends.read().unwrap().len(), 1);
 
         // Verify the remaining backend
-        assert_eq!(director.backends.lock().unwrap()[0].name, "test2");
-        assert_eq!(director.backends.lock().unwrap()[0].address, SocketAddr::from(([127, 0, 0, 2], 8081)));
+        assert_eq!(director.backends.read().unwrap()[0].name, "test2");
+        assert_eq!(director.backends.read().unwrap()[0].address, SocketAddr::from(([127, 0, 0, 2], 8081)));
     }
 
     #[test]
