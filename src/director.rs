@@ -5,7 +5,7 @@ use rand::seq::IteratorRandom;
 use std::time::SystemTime;
 
 use crate::backend::Backend;
-use crate::probe::{ProbeTable, ProbeResult};
+use crate::probe::{ProbeTable, ProbeResult, PROBE_TABLE_SIZE};
 
 use varnish::ffi::VCL_BACKEND;
 
@@ -32,6 +32,7 @@ pub struct Director {
 }
 
 const PROBE_INTERVAL: Duration = Duration::from_secs(5);
+const DEFAULT_PROBE_COUNT: usize = 3;
 
 impl Director {
     /// Creates a new Director instance along with its probe loop closure.
@@ -55,7 +56,7 @@ impl Director {
                 while let Some(director) = inner.upgrade() {
                     // Wait for trigger or timeout
                     if rx.recv_timeout(PROBE_INTERVAL).is_ok() {
-                        director.probe_backends();
+                        director.probe_backends(DEFAULT_PROBE_COUNT);
                     } else {
                         // Ensure probe pool every interval
                         director.ensure_probe_pool();
@@ -167,11 +168,11 @@ impl Director {
 
     /// Randomly selects and probes a subset of backends.
     /// Updates the probe table with results from successful probes.
-    fn probe_backends(&self) {
+    fn probe_backends(&self, count: usize) {
         let backends_to_probe = if let Ok(backends) = self.backends.read() {
             let mut rng = rand::thread_rng();
             backends.iter()
-                .choose_multiple(&mut rng, 3)
+                .choose_multiple(&mut rng, count)
                 .into_iter()
                 .cloned()
                 .collect::<Vec<_>>()
@@ -221,7 +222,7 @@ impl Director {
 
     fn ensure_probe_pool(&self) {
         if !self.probe_table.has_enough_probes() {
-            self.probe_backends();
+            self.probe_backends(PROBE_TABLE_SIZE / 2);
         }
     }
 }
@@ -352,7 +353,6 @@ mod tests {
             director.add_backend(backend).unwrap();
         }
 
-        println!("Triggering probe manually");
         director.trigger_probe();
 
         // Wait for probes to complete
@@ -366,5 +366,55 @@ mod tests {
         // The director should prefer the backend with lowest in_flight count
         let selected = director.get_backend().unwrap();
         assert_eq!(selected.address, servers[0].addr);  // Should select the least loaded server
+    }
+
+    #[test]
+    fn test_director_probe_table_health() {
+        let mut servers = Vec::new();
+        for i in 0..100 {
+            servers.push(TestServer::new(
+                i % 20,  // RIF varies from 0-19
+                100 + (i * 10),  // Latency increases with index
+            ));
+        }
+
+        let (director, probe_loop) = Director::new();
+        let _probe_thread = thread::spawn(probe_loop);
+
+        for (idx, server) in servers.iter().enumerate() {
+            let backend = create_test_backend(
+                &format!("test{}", idx),
+                server.addr,
+                idx as u32
+            );
+            director.add_backend(backend).unwrap();
+        }
+
+        director.trigger_probe();
+        thread::sleep(Duration::from_secs(1));
+
+        if let Some(table) = director.debug_probe_table() {
+            println!("Probe table at beginning: \n{}", table);
+        }
+
+        for i in 0..1000 {
+            let backend = director.get_backend().unwrap();
+            assert!(backend.name.starts_with("test"), "Backend name should start with 'test'");
+
+            if i > 0 && i % 100 == 0 {
+                if let Some(table) = director.debug_probe_table() {
+                    println!("Probe table at request {}: \n{}", i, table);
+                }
+
+                assert!(director.probe_table.has_enough_probes(), 
+                    "Probe table should be at least half full at request {} but had {}", i, director.probe_table.len());
+            }
+
+            // sleep for a bit in between requests
+            thread::sleep(Duration::from_millis(2));
+        }
+
+        assert!(director.probe_table.has_enough_probes(), 
+            "Probe table should be sufficiently full after test");
     }
 }
