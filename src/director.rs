@@ -2,6 +2,7 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use std::sync::mpsc::{channel, Sender};
 use rand::seq::IteratorRandom;
+use std::time::SystemTime;
 
 use crate::backend::Backend;
 use crate::probe::{ProbeTable, ProbeResult};
@@ -201,7 +202,8 @@ impl Director {
                             None => continue,
                     };
 
-                    self.probe_table.add_result(ProbeResult::new(in_flight, est_latency, backend));
+                    let now = SystemTime::now();
+                    self.probe_table.add_result(ProbeResult::new(now, in_flight, est_latency, backend));
                 },
                 Err(_) => continue,
             }

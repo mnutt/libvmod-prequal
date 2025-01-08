@@ -18,9 +18,9 @@ pub struct ProbeResult {
 }
 
 impl ProbeResult {
-    pub fn new(rif: usize, est_latency: usize, backend: Backend) -> Self {
+    pub fn new(timestamp: SystemTime, rif: usize, est_latency: usize, backend: Backend) -> Self {
         Self {
-            timestamp: SystemTime::now(),
+            timestamp,
             rif,
             est_latency,
             used_count: AtomicUsize::new(0),
@@ -168,6 +168,72 @@ impl ProbeTable {
 
         // If pool is less than half full, signal that we need more probes
         let pool_size = self.len();
-        pool_size < PROBE_TABLE_SIZE / 2
+        pool_size >= PROBE_TABLE_SIZE / 2
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use varnish::ffi::{VCL_BACKEND, director}; 
+    use std::net::SocketAddr; 
+
+    fn create_test_probe(name: &str, rif: usize, est_latency: usize, timestamp: SystemTime) -> ProbeResult {
+        ProbeResult::new(timestamp,rif, est_latency, Backend {
+            name: name.to_string(),
+            address: SocketAddr::from(([127, 0, 0, 1], 8080)),
+            vcl_backend: VCL_BACKEND(1 as *const director),
+        })
+    }
+
+    #[test]
+    fn test_probe_table() {
+        let table = ProbeTable::new();
+        assert_eq!(table.len(), 0);
+    }
+
+    #[test]
+    fn test_probe_table_add_result() {
+        let table = ProbeTable::new();
+        let result = create_test_probe("test", 10, 100, SystemTime::now());
+        table.add_result(result);
+        assert_eq!(table.len(), 1);
+    }
+
+    #[test]
+    fn test_probe_table_find_best() {
+        let table = ProbeTable::new();
+        let result = create_test_probe("test", 10, 100, SystemTime::now());
+        table.add_result(result.clone());
+        assert_eq!(table.find_best(), Some(result.backend));
+    }
+
+    #[test]
+    fn test_probe_table_remove_backend() {
+        let table = ProbeTable::new();
+        let result = create_test_probe("test", 10, 100, SystemTime::now());
+        table.add_result(result.clone());
+        table.remove_backend(result.backend);
+        assert_eq!(table.len(), 0);
+    }
+
+    #[test]
+    fn test_probe_table_remove_stale() {
+        let table = ProbeTable::new();
+        let result = create_test_probe("test", 10, 100, SystemTime::now() - MAX_PROBE_AGE - Duration::from_secs(1));
+        table.add_result(result.clone());
+        table.remove_stale();
+        assert_eq!(table.len(), 0);
+    }
+
+    #[test]
+    fn test_probe_table_has_enough_probes() {
+        let table = ProbeTable::new();
+        table.add_result(create_test_probe("test", 10, 100, SystemTime::now()));
+        assert!(!table.has_enough_probes(), "Table should not yet have enough probes");
+        for idx in 0..PROBE_TABLE_SIZE / 2 {
+            table.add_result(create_test_probe(&format!("test-{}", idx), 10, 100, SystemTime::now()));
+        }
+        assert!(table.has_enough_probes(), "Table should now have enough probes");
     }
 }
