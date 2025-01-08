@@ -31,7 +31,7 @@ impl ProbeResult {
         self.used_count.fetch_add(1, Ordering::SeqCst) + 1
     }
 
-    pub fn is_expired(&self) -> bool {
+    pub fn is_over_used(&self) -> bool {
         self.used_count.load(Ordering::SeqCst) >= MAX_USES_BEFORE_EXPIRE
     }
 }
@@ -66,20 +66,19 @@ impl ProbeTable {
         let idx = self.next_index.fetch_add(1, Ordering::SeqCst) % PROBE_TABLE_SIZE;
         if let Ok(mut results) = self.results.lock() {
             results[idx] = Some(result);
-            self.next_index.store(idx, Ordering::SeqCst);
         }
     }
 
     pub fn find_best(&self) -> Option<Backend> {
         let mut results = self.results.lock().ok()?;
         
-        // Find the best non-expired probe
+        // Find the best non-over-used probe
         let best_idx = results.iter()
             .enumerate()
             .filter_map(|(idx, probe)| {
                 probe.as_ref().map(|p| (idx, p))
             })
-            .filter(|(_, probe)| !probe.is_expired())
+            .filter(|(_, probe)| !probe.is_over_used())
             .min_by_key(|(_, probe)| probe.in_flight)
             .map(|(idx, _)| idx)?;
 

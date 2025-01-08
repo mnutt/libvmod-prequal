@@ -7,8 +7,8 @@ mod prequal_director;
 use std::sync::Arc;
 use std::thread;
 
-use prequal_director::Director;
-use backend::Backend;
+pub use prequal_director::Director;
+pub use backend::Backend;
 
 use varnish::ffi::VCL_BACKEND;
 use varnish::vcl::{Ctx, VclError, LogTag};
@@ -89,6 +89,11 @@ mod prequal {
         /// `true` if there are valid probe results, `false` otherwise
         pub fn healthy(&self) -> bool {
             self.inner.is_healthy()
+        }
+
+        /// Triggers a probe fetch for every backend.
+        pub fn seed_probes(&self) {
+            self.inner.trigger_probe();
         }
 
         /// Logs the current state of the probe table for debugging.
