@@ -148,4 +148,26 @@ impl ProbeTable {
     pub fn has_probes(&self) -> bool {
         self.results.lock().unwrap().len() > 0
     }
+
+    pub fn remove_stale(&self) {
+        if let Ok(mut results) = self.results.lock() {
+            let now = SystemTime::now();
+            results.retain(|p| now.duration_since(p.timestamp).unwrap() <= MAX_PROBE_AGE);
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.results.lock()
+            .map(|results| results.len())
+            .unwrap_or(0)
+    }
+
+    pub fn has_enough_probes(&self) -> bool {
+        // First remove any stale probes
+        self.remove_stale();
+
+        // If pool is less than half full, signal that we need more probes
+        let pool_size = self.len();
+        pool_size < PROBE_TABLE_SIZE / 2
+    }
 }

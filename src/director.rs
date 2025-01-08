@@ -30,6 +30,8 @@ pub struct Director {
     probe_path: RwLock<String>,
 }
 
+const PROBE_INTERVAL: Duration = Duration::from_secs(5);
+
 impl Director {
     /// Creates a new Director instance along with its probe loop closure.
     /// 
@@ -50,8 +52,12 @@ impl Director {
             let inner = Arc::downgrade(&inner);
             move || {
                 while let Some(director) = inner.upgrade() {
-                    if rx.recv().is_ok() {
+                    // Wait for trigger or timeout
+                    if rx.recv_timeout(PROBE_INTERVAL).is_ok() {
                         director.probe_backends();
+                    } else {
+                        // Ensure probe pool every interval
+                        director.ensure_probe_pool();
                     }
                 }
             }
@@ -209,6 +215,12 @@ impl Director {
     pub fn is_healthy(&self) -> bool {
         // Only healthy if we have valid probe results
         self.probe_table.has_probes()
+    }
+
+    fn ensure_probe_pool(&self) {
+        if !self.probe_table.has_enough_probes() {
+            self.probe_backends();
+        }
     }
 }
 
