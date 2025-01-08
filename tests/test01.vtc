@@ -26,6 +26,7 @@ varnish v1 -vcl+backend {
 		new dir = prequal.director();
 		dir.add_backend(s00);
 		dir.add_backend(s01);
+		dir.seed_probes();
 	}
 
 	sub vcl_recv {
