@@ -15,11 +15,9 @@ jobs:
   test:
     runs-on: ubuntu-latest
     strategy:
-      fail-fast: false  # 7.6 is not yet supported properly. Once fixed, this can be set to true
+      fail-fast: true
       matrix:
         include:
-          - setup: varnish74
-          - setup: varnish75
           - setup: varnish76
     env:
       RUST_BACKTRACE: 1

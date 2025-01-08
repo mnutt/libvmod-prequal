@@ -1116,6 +1116,7 @@ dependencies = [
 [[package]]
 name = "varnish"
 version = "0.4.0"
+source = "git+https://github.com/mnutt/varnish-rs?branch=vcl-backend-arg#aac9d3201445fb2da0ab8b1e0247e1b8388295af"
 dependencies = [
  "glob",
  "varnish-macros",
@@ -1125,6 +1126,7 @@ dependencies = [
 [[package]]
 name = "varnish-macros"
 version = "0.4.0"
+source = "git+https://github.com/mnutt/varnish-rs?branch=vcl-backend-arg#aac9d3201445fb2da0ab8b1e0247e1b8388295af"
 dependencies = [
  "darling",
  "prettyplease",
@@ -1139,6 +1141,7 @@ dependencies = [
 [[package]]
 name = "varnish-sys"
 version = "0.4.0"
+source = "git+https://github.com/mnutt/varnish-rs?branch=vcl-backend-arg#aac9d3201445fb2da0ab8b1e0247e1b8388295af"
 dependencies = [
  "bindgen_helpers",
  "memchr",
