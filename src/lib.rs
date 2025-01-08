@@ -18,7 +18,7 @@ pub struct director {
     inner: Arc<Director>,
 }
 
-#[varnish::vmod]
+#[varnish::vmod(docs = "README.md")]
 mod prequal {
     use super::*;
 
