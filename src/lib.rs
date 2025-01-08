@@ -55,9 +55,7 @@ mod prequal {
                     .inner
                     .add_backend(backend)
                     .map_err(|e| VclError::new(format!("Failed to add backend: {:?}", e))),
-                Err(e) => {
-                    return Err(VclError::new(format!("Invalid backend: {:?}", e)));
-                }
+                Err(e) => Err(VclError::new(format!("Invalid backend: {:?}", e))),
             }
         }
 
@@ -105,7 +103,7 @@ mod prequal {
         /// * `ctx` - The VCL context for logging
         pub fn log_probes(&self, ctx: &mut Ctx) {
             if let Some(table) = self.inner.debug_probe_table() {
-                ctx.log(LogTag::Debug, &format!("Probe table state:{}", table));
+                ctx.log(LogTag::Debug, format!("Probe table state:{}", table));
             }
         }
     }

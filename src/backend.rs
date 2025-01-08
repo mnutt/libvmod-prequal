@@ -27,17 +27,17 @@ impl PartialEq<VCL_BACKEND> for Backend {
 
 #[derive(Debug)]
 pub enum BackendError {
-    InvalidBackendMagic,
-    InvalidDirectorMagic,
-    InvalidAddress,
+    BackendMagic,
+    DirectorMagic,
+    Address,
 }
 
 impl std::fmt::Display for BackendError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            BackendError::InvalidBackendMagic => write!(f, "Invalid backend magic number"),
-            BackendError::InvalidDirectorMagic => write!(f, "Invalid director magic number"),
-            BackendError::InvalidAddress => write!(f, "Invalid or missing backend address"),
+            BackendError::BackendMagic => write!(f, "Invalid backend magic number"),
+            BackendError::DirectorMagic => write!(f, "Invalid director magic number"),
+            BackendError::Address => write!(f, "Invalid or missing backend address"),
         }
     }
 }
@@ -51,17 +51,17 @@ impl Backend {
             let director = backend_director
                 .0
                 .as_ref()
-                .ok_or(BackendError::InvalidDirectorMagic)?;
+                .ok_or(BackendError::DirectorMagic)?;
             if director.magic != DIRECTOR_MAGIC {
-                return Err(BackendError::InvalidDirectorMagic);
+                return Err(BackendError::DirectorMagic);
             }
 
             // Then validate backend
             let backend = (director.priv_ as *const backend)
                 .as_ref()
-                .ok_or(BackendError::InvalidBackendMagic)?;
+                .ok_or(BackendError::BackendMagic)?;
             if backend.magic != BACKEND_MAGIC {
-                return Err(BackendError::InvalidBackendMagic);
+                return Err(BackendError::BackendMagic);
             }
 
             Ok(Self {
@@ -93,7 +93,7 @@ impl Backend {
     fn address_from_backend(backend: &backend) -> Result<SocketAddr, BackendError> {
         unsafe {
             let endpoint = (*backend.endpoint).ipv4;
-            Option::<SocketAddr>::from(endpoint).ok_or(BackendError::InvalidAddress)
+            Option::<SocketAddr>::from(endpoint).ok_or(BackendError::Address)
         }
     }
 }
@@ -183,7 +183,7 @@ mod tests {
         let backend = Box::new(backend {
             magic: BACKEND_MAGIC,
             n_conn: 0,
-            endpoint: endpoint,
+            endpoint,
             vcl_name: name_ptr,
             hosthdr: name_ptr,
             authority: ptr::null_mut(),
@@ -246,7 +246,7 @@ mod tests {
 
         let result = Backend::new(backend);
 
-        assert!(matches!(result, Err(BackendError::InvalidBackendMagic)));
+        assert!(matches!(result, Err(BackendError::BackendMagic)));
     }
 
     #[test]
@@ -266,6 +266,6 @@ mod tests {
 
         let result = Backend::new(backend);
 
-        assert!(matches!(result, Err(BackendError::InvalidDirectorMagic)));
+        assert!(matches!(result, Err(BackendError::DirectorMagic)));
     }
 }
