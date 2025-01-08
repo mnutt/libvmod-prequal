@@ -1,8 +1,8 @@
-use std::fmt;
 use std::ffi::CStr;
+use std::fmt;
 use std::net::SocketAddr;
 
-use varnish::ffi::{VCL_BACKEND, BACKEND_MAGIC, DIRECTOR_MAGIC, backend};
+use varnish::ffi::{backend, BACKEND_MAGIC, DIRECTOR_MAGIC, VCL_BACKEND};
 
 #[derive(Debug, Clone)]
 pub struct Backend {
@@ -46,9 +46,11 @@ impl std::error::Error for BackendError {}
 
 impl Backend {
     pub fn new(backend_director: VCL_BACKEND) -> Result<Self, BackendError> {
-        unsafe {            
+        unsafe {
             // Validate director first
-            let director = backend_director.0.as_ref()
+            let director = backend_director
+                .0
+                .as_ref()
                 .ok_or(BackendError::InvalidDirectorMagic)?;
             if director.magic != DIRECTOR_MAGIC {
                 return Err(BackendError::InvalidDirectorMagic);
@@ -91,8 +93,7 @@ impl Backend {
     fn address_from_backend(backend: &backend) -> Result<SocketAddr, BackendError> {
         unsafe {
             let endpoint = (*backend.endpoint).ipv4;
-            Option::<SocketAddr>::from(endpoint)
-                .ok_or(BackendError::InvalidAddress)
+            Option::<SocketAddr>::from(endpoint).ok_or(BackendError::InvalidAddress)
         }
     }
 }
@@ -104,14 +105,16 @@ impl fmt::Display for Backend {
 }
 
 unsafe impl Send for Backend {}
-unsafe impl Sync for Backend {} 
+unsafe impl Sync for Backend {}
 
 #[cfg(test)]
 mod tests {
-    use std::ptr;
-    use std::ffi::{CString, c_void};
+    use std::ffi::{c_void, CString};
     use std::net::SocketAddr;
-    use varnish::ffi::{VCL_IP, VRT_ENDPOINT_MAGIC, backend, vrt_endpoint, suckaddr};
+    use std::ptr;
+
+    use varnish::ffi::{backend, suckaddr, vrt_endpoint, VCL_IP, VRT_ENDPOINT_MAGIC};
+
     use super::*;
 
     // Normally we could use varnish helper functions to create a suckaddr,
@@ -119,13 +122,13 @@ mod tests {
     fn create_test_vcl_ip(addr: SocketAddr) -> VCL_IP {
         const SUCKADDR_SIZE: usize = 128;
         const VSA_MAGIC: u32 = 0x4b1e9335;
-    
+
         #[repr(C)]
         struct TestSuckaddr {
             magic: u32,
             data: [u8; SUCKADDR_SIZE - size_of::<u32>()],
         }
-        
+
         let mut test_addr = Box::new(TestSuckaddr {
             magic: VSA_MAGIC,
             data: [0; SUCKADDR_SIZE - size_of::<u32>()],
@@ -135,17 +138,17 @@ mod tests {
             let bytes = test_addr.data.as_mut_ptr();
             match addr {
                 SocketAddr::V4(addr4) => {
-                    *bytes.add(0) = 4;                             // length of address
-                    *bytes.add(1) = 2;                             // AF_INET
+                    *bytes.add(0) = 4; // length of address
+                    *bytes.add(1) = 2; // AF_INET
                     let port = addr4.port();
-                    *bytes.add(2) = ((port & 0xFF00) >> 8) as u8;  // High byte of port
-                    *bytes.add(3) = (port & 0xFF) as u8;           // Low byte of port
+                    *bytes.add(2) = ((port & 0xFF00) >> 8) as u8; // High byte of port
+                    *bytes.add(3) = (port & 0xFF) as u8; // Low byte of port
                     let octets = addr4.ip().octets();
                     *bytes.add(4) = octets[0];
                     *bytes.add(5) = octets[1];
                     *bytes.add(6) = octets[2];
                     *bytes.add(7) = octets[3];
-                },
+                }
                 SocketAddr::V6(_) => todo!("IPv6 support"),
             }
         }
@@ -220,7 +223,7 @@ mod tests {
     fn test_backend_parsing() {
         let addr = SocketAddr::from(([127, 0, 0, 1], 8080));
         let backend = create_test_backend("test1", addr);
-        
+
         let parsed = Backend::new(backend).unwrap();
         assert_eq!(parsed.name, "test1");
         assert_eq!(parsed.address, addr);
@@ -266,4 +269,3 @@ mod tests {
         assert!(matches!(result, Err(BackendError::InvalidDirectorMagic)));
     }
 }
-

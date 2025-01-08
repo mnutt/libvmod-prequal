@@ -1,13 +1,12 @@
-use std::sync::{Arc, RwLock};
-use std::time::Duration;
 use std::sync::mpsc::{channel, Sender};
+use std::sync::{Arc, RwLock};
+use std::time::{Duration, SystemTime};
+
 use rand::seq::IteratorRandom;
-use std::time::SystemTime;
+use varnish::ffi::VCL_BACKEND;
 
 use crate::backend::Backend;
-use crate::probe::{ProbeTable, ProbeResult, PROBE_TABLE_SIZE};
-
-use varnish::ffi::VCL_BACKEND;
+use crate::probe::{ProbeResult, ProbeTable, PROBE_TABLE_SIZE};
 
 #[derive(Debug)]
 pub enum DirectorError {
@@ -36,7 +35,7 @@ const DEFAULT_PROBE_COUNT: usize = 3;
 
 impl Director {
     /// Creates a new Director instance along with its probe loop closure.
-    /// 
+    ///
     /// Returns a tuple containing:
     /// - An Arc-wrapped Director instance
     /// - A closure that runs the probe loop when spawned in a thread
@@ -69,7 +68,7 @@ impl Director {
     }
 
     /// Sets the HTTP path used for health check probes.
-    /// 
+    ///
     /// # Arguments
     /// * `path` - The URL path to use for probe requests (e.g. "/probe")
     pub fn set_probe_path(&self, path: &str) {
@@ -79,32 +78,31 @@ impl Director {
     }
 
     /// Adds a backend to the director's pool.
-    /// 
+    ///
     /// # Arguments
     /// * `backend` - The backend to add
-    /// 
+    ///
     /// # Returns
     /// * `Ok(())` if the backend was added successfully
     /// * `Err(DirectorError)` if the backend could not be added
     pub fn add_backend(&self, backend: Backend) -> Result<(), DirectorError> {
-        let mut backends = self.backends.write()
+        let mut backends = self
+            .backends
+            .write()
             .map_err(|e| DirectorError::BackendLockError(e.to_string()))?;
-        
+
         backends.push(backend);
         Ok(())
     }
 
     /// Removes a backend from the pool by its VCL_BACKEND reference.
     /// Also removes any probe results for this backend.
-    /// 
+    ///
     /// # Arguments
     /// * `vcl_backend` - The VCL_BACKEND reference to remove
     pub fn remove_backend(&self, vcl_backend: VCL_BACKEND) {
         if let Ok(mut backends) = self.backends.write() {
-            if let Some(backend) = backends.iter()
-                .find(|b| **b == vcl_backend)
-                .cloned() 
-            {
+            if let Some(backend) = backends.iter().find(|b| **b == vcl_backend).cloned() {
                 self.probe_table.remove_backend(backend);
                 backends.retain(|b| *b != vcl_backend);
             }
@@ -116,7 +114,7 @@ impl Director {
     }
 
     /// Returns a string representation of the probe table, for debugging.
-    /// 
+    ///
     /// # Returns
     /// * `Some(String)` - The probe table as a string
     /// * `None` - If the probe table could not be locked
@@ -126,16 +124,20 @@ impl Director {
 
     /// Gets the best available backend based on probe results.
     /// Falls back to random selection if no probe results are available.
-    /// 
+    ///
     /// # Returns
     /// * `Ok(VCL_BACKEND)` - The selected backend
     /// * `Err(VclError)` - If no backends are available
     pub fn get_backend(&self) -> Result<Backend, DirectorError> {
-        let backends = self.backends.read()
+        let backends = self
+            .backends
+            .read()
             .map_err(|e| DirectorError::BackendLockError(e.to_string()))?;
 
         if backends.is_empty() {
-            return Err(DirectorError::BackendLockError("No backends available".to_string()));
+            return Err(DirectorError::BackendLockError(
+                "No backends available".to_string(),
+            ));
         }
 
         let _ = self.probe_trigger.send(());
@@ -149,14 +151,16 @@ impl Director {
     }
 
     /// Constructs a probe request for a backend.
-    /// 
+    ///
     /// # Arguments
     /// * `backend` - The backend to probe
-    /// 
+    ///
     /// # Returns
     /// A configured HTTP request ready to be sent
     fn construct_probe_request(&self, backend: &Backend) -> ureq::Request {
-        let probe_path = self.probe_path.read()
+        let probe_path = self
+            .probe_path
+            .read()
             .map(|p| p.clone())
             .unwrap_or_else(|_| "/probe".to_string());
 
@@ -171,7 +175,8 @@ impl Director {
     fn probe_backends(&self, count: usize) {
         let backends_to_probe = if let Ok(backends) = self.backends.read() {
             let mut rng = rand::thread_rng();
-            backends.iter()
+            backends
+                .iter()
                 .choose_multiple(&mut rng, count)
                 .into_iter()
                 .cloned()
@@ -191,28 +196,35 @@ impl Director {
 
                     let in_flight = match response
                         .header("X-In-Flight")
-                        .and_then(|s| s.parse::<usize>().ok()) {
-                            Some(val) => val,
-                            None => continue,
+                        .and_then(|s| s.parse::<usize>().ok())
+                    {
+                        Some(val) => val,
+                        None => continue,
                     };
 
                     let est_latency = match response
                         .header("X-Estimated-Latency")
-                        .and_then(|s| s.parse::<usize>().ok()) {
-                            Some(val) => val,
-                            None => continue,
+                        .and_then(|s| s.parse::<usize>().ok())
+                    {
+                        Some(val) => val,
+                        None => continue,
                     };
 
                     let now = SystemTime::now();
-                    self.probe_table.add_result(ProbeResult::new(now, in_flight, est_latency, backend));
-                },
+                    self.probe_table.add_result(ProbeResult::new(
+                        now,
+                        in_flight,
+                        est_latency,
+                        backend,
+                    ));
+                }
                 Err(_) => continue,
             }
         }
     }
 
     /// Checks if the director has any valid probe results.
-    /// 
+    ///
     /// # Returns
     /// `true` if there are valid probe results, `false` otherwise
     pub fn is_healthy(&self) -> bool {
@@ -229,13 +241,15 @@ impl Director {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use varnish::ffi::{VCL_BACKEND, director};   
+    use std::fmt::Debug;
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::{SocketAddr, TcpListener};
     use std::thread;
-    use std::net::{TcpListener, SocketAddr};
-    use std::io::{Write, BufReader, BufRead};
     use std::time::Duration;
-    use std::fmt::Debug;    
+
+    use varnish::ffi::{director, VCL_BACKEND};
+
+    use super::*;
 
     fn create_test_backend(name: &str, addr: SocketAddr, director_id: u32) -> Backend {
         Backend {
@@ -248,14 +262,14 @@ mod tests {
     #[test]
     fn test_director_add_remove_backend() {
         let (director, _) = Director::new();
-        
+
         let backend = create_test_backend("test1", SocketAddr::from(([127, 0, 0, 1], 8080)), 1);
         let backend2 = create_test_backend("test2", SocketAddr::from(([127, 0, 0, 2], 8081)), 2);
 
         // Add backend and verify
         director.add_backend(backend).unwrap();
         assert_eq!(director.backends.read().unwrap().len(), 1);
-        
+
         // Verify the backend name
         assert_eq!(director.backends.read().unwrap()[0].name, "test1");
 
@@ -269,7 +283,10 @@ mod tests {
 
         // Verify the remaining backend
         assert_eq!(director.backends.read().unwrap()[0].name, "test2");
-        assert_eq!(director.backends.read().unwrap()[0].address, SocketAddr::from(([127, 0, 0, 2], 8081)));
+        assert_eq!(
+            director.backends.read().unwrap()[0].address,
+            SocketAddr::from(([127, 0, 0, 2], 8081))
+        );
     }
 
     #[test]
@@ -299,10 +316,12 @@ mod tests {
                     let mut stream = stream.unwrap();
                     let mut reader = BufReader::new(&stream);
                     let mut line = String::new();
-                    
+
                     // Read the request
                     while let Ok(len) = reader.read_line(&mut line) {
-                        if len == 0 || line == "\r\n" { break; }
+                        if len == 0 || line == "\r\n" {
+                            break;
+                        }
                         line.clear();
                     }
 
@@ -320,13 +339,22 @@ mod tests {
                 }
             });
 
-            Self { addr, in_flight, latency, _thread }
+            Self {
+                addr,
+                in_flight,
+                latency,
+                _thread,
+            }
         }
     }
 
     impl Debug for TestServer {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "TestServer {{ addr: {:?}, in_flight: {}, latency: {} }}", self.addr, self.in_flight, self.latency)
+            write!(
+                f,
+                "TestServer {{ addr: {:?}, in_flight: {}, latency: {} }}",
+                self.addr, self.in_flight, self.latency
+            )
         }
     }
 
@@ -334,9 +362,9 @@ mod tests {
     fn test_director_probing() {
         // Create test servers with different loads
         let servers = vec![
-            TestServer::new(5, 100),   // Low load
-            TestServer::new(10, 200),  // Medium load
-            TestServer::new(15, 300),  // High load
+            TestServer::new(5, 100),  // Low load
+            TestServer::new(10, 200), // Medium load
+            TestServer::new(15, 300), // High load
         ];
 
         // Create and configure director
@@ -345,11 +373,7 @@ mod tests {
 
         // Add backends
         for (idx, server) in servers.iter().enumerate() {
-            let backend = create_test_backend(
-                &format!("test{}", idx),
-                server.addr,
-                idx as u32
-            );
+            let backend = create_test_backend(&format!("test{}", idx), server.addr, idx as u32);
             director.add_backend(backend).unwrap();
         }
 
@@ -365,7 +389,7 @@ mod tests {
 
         // The director should prefer the backend with lowest in_flight count
         let selected = director.get_backend().unwrap();
-        assert_eq!(selected.address, servers[0].addr);  // Should select the least loaded server
+        assert_eq!(selected.address, servers[0].addr); // Should select the least loaded server
     }
 
     #[test]
@@ -373,8 +397,8 @@ mod tests {
         let mut servers = Vec::new();
         for i in 0..100 {
             servers.push(TestServer::new(
-                i % 20,  // RIF varies from 0-19
-                100 + (i * 10),  // Latency increases with index
+                i % 20,         // RIF varies from 0-19
+                100 + (i * 10), // Latency increases with index
             ));
         }
 
@@ -382,11 +406,7 @@ mod tests {
         let _probe_thread = thread::spawn(probe_loop);
 
         for (idx, server) in servers.iter().enumerate() {
-            let backend = create_test_backend(
-                &format!("test{}", idx),
-                server.addr,
-                idx as u32
-            );
+            let backend = create_test_backend(&format!("test{}", idx), server.addr, idx as u32);
             director.add_backend(backend).unwrap();
         }
 
@@ -399,22 +419,31 @@ mod tests {
 
         for i in 0..1000 {
             let backend = director.get_backend().unwrap();
-            assert!(backend.name.starts_with("test"), "Backend name should start with 'test'");
+            assert!(
+                backend.name.starts_with("test"),
+                "Backend name should start with 'test'"
+            );
 
             if i > 0 && i % 100 == 0 {
                 if let Some(table) = director.debug_probe_table() {
                     println!("Probe table at request {}: \n{}", i, table);
                 }
 
-                assert!(director.probe_table.has_enough_probes(), 
-                    "Probe table should be at least half full at request {} but had {}", i, director.probe_table.len());
+                assert!(
+                    director.probe_table.has_enough_probes(),
+                    "Probe table should be at least half full at request {} but had {}",
+                    i,
+                    director.probe_table.len()
+                );
             }
 
             // sleep for a bit in between requests
             thread::sleep(Duration::from_millis(2));
         }
 
-        assert!(director.probe_table.has_enough_probes(), 
-            "Probe table should be sufficiently full after test");
+        assert!(
+            director.probe_table.has_enough_probes(),
+            "Probe table should be sufficiently full after test"
+        );
     }
 }

@@ -1,6 +1,6 @@
-use std::time::{SystemTime, Duration};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
+use std::time::{Duration, SystemTime};
 
 use crate::backend::Backend;
 
@@ -11,7 +11,7 @@ const MAX_USES_BEFORE_EXPIRE: usize = 3;
 #[derive(Debug)]
 pub struct ProbeResult {
     pub timestamp: SystemTime,
-    pub rif: usize, // requests in flight
+    pub rif: usize,         // requests in flight
     pub est_latency: usize, // estimated latency
     pub used_count: AtomicUsize,
     pub backend: Backend,
@@ -57,10 +57,8 @@ pub struct ProbeTable {
 
 pub fn remove_stale_and_over_used(results: &mut Vec<ProbeResult>) {
     let now = SystemTime::now();
-    results.retain(|p| 
-        !p.is_over_used() &&
-        now.duration_since(p.timestamp).unwrap() <= MAX_PROBE_AGE
-    );        
+    results
+        .retain(|p| !p.is_over_used() && now.duration_since(p.timestamp).unwrap() <= MAX_PROBE_AGE);
 }
 
 pub fn remove_worst_probe(results: &mut Vec<ProbeResult>) {
@@ -84,14 +82,14 @@ impl ProbeTable {
             results.retain(|p| p.backend != result.backend);
 
             results.push(result);
-            while results.len() > PROBE_TABLE_SIZE {                
+            while results.len() > PROBE_TABLE_SIZE {
                 remove_worst_probe(&mut results);
             }
-                        
+
             let max_rif = results.iter().map(|p| p.rif).max().unwrap_or(0);
             self.max_rif.store(max_rif, Ordering::SeqCst);
         }
-    }    
+    }
 
     pub fn find_best(&self) -> Option<Backend> {
         let probes: Vec<ProbeResult> = {
@@ -108,13 +106,15 @@ impl ProbeTable {
         let threshold = (max_rif as f64 * 0.8) as usize;
 
         // Partition probes into cold and hot, based on rif threshold
-        let (cold_probes, hot_probes): (Vec<_>, Vec<_>) = probes.iter()
+        let (cold_probes, hot_probes): (Vec<_>, Vec<_>) = probes
+            .iter()
             .enumerate()
             .partition(|(_, probe)| probe.rif <= threshold);
 
         // Prefer cold probe with lowest latency
         // Fall back to hot probe with lowest rif if no cold probes available
-        let best = cold_probes.iter()
+        let best = cold_probes
+            .iter()
             .min_by_key(|(_, probe)| probe.est_latency)
             .or_else(|| hot_probes.iter().min_by_key(|(_, probe)| probe.rif))
             .map(|(_, probe)| probe)?;
@@ -143,7 +143,10 @@ impl ProbeTable {
                 probe.rif,
                 probe.est_latency,
                 probe.used_count.load(Ordering::SeqCst),
-                SystemTime::now().duration_since(probe.timestamp).unwrap().as_secs()
+                SystemTime::now()
+                    .duration_since(probe.timestamp)
+                    .unwrap()
+                    .as_secs()
             ));
         }
 
@@ -162,7 +165,8 @@ impl ProbeTable {
     }
 
     pub fn len(&self) -> usize {
-        self.results.lock()
+        self.results
+            .lock()
             .map(|results| results.len())
             .unwrap_or(0)
     }
@@ -179,16 +183,29 @@ impl ProbeTable {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use varnish::ffi::{VCL_BACKEND, director}; 
-    use std::net::SocketAddr; 
+    use std::net::SocketAddr;
 
-    fn create_test_probe(idx: usize, name: &str, rif: usize, est_latency: usize, timestamp: SystemTime) -> ProbeResult {
-        ProbeResult::new(timestamp,rif, est_latency, Backend {
-            name: name.to_string(),
-            address: SocketAddr::from(([127, 0, 0, 1], 8080)),
-            vcl_backend: VCL_BACKEND(idx as *const director),
-        })
+    use varnish::ffi::{director, VCL_BACKEND};
+
+    use super::*;
+
+    fn create_test_probe(
+        idx: usize,
+        name: &str,
+        rif: usize,
+        est_latency: usize,
+        timestamp: SystemTime,
+    ) -> ProbeResult {
+        ProbeResult::new(
+            timestamp,
+            rif,
+            est_latency,
+            Backend {
+                name: name.to_string(),
+                address: SocketAddr::from(([127, 0, 0, 1], 8080)),
+                vcl_backend: VCL_BACKEND(idx as *const director),
+            },
+        )
     }
 
     #[test]
@@ -225,7 +242,13 @@ mod tests {
     #[test]
     fn test_probe_table_remove_stale() {
         let table = ProbeTable::new();
-        let result = create_test_probe(0, "test", 10, 100, SystemTime::now() - MAX_PROBE_AGE - Duration::from_secs(1));
+        let result = create_test_probe(
+            0,
+            "test",
+            10,
+            100,
+            SystemTime::now() - MAX_PROBE_AGE - Duration::from_secs(1),
+        );
         table.add_result(result.clone());
         table.remove_stale();
         assert_eq!(table.len(), 0);
@@ -235,10 +258,22 @@ mod tests {
     fn test_probe_table_has_enough_probes() {
         let table = ProbeTable::new();
         table.add_result(create_test_probe(0, "test", 10, 100, SystemTime::now()));
-        assert!(!table.has_enough_probes(), "Table should not yet have enough probes");
+        assert!(
+            !table.has_enough_probes(),
+            "Table should not yet have enough probes"
+        );
         for idx in 0..PROBE_TABLE_SIZE / 2 {
-            table.add_result(create_test_probe(idx + 1, &format!("test-{}", idx), 10, 100, SystemTime::now()));
+            table.add_result(create_test_probe(
+                idx + 1,
+                &format!("test-{}", idx),
+                10,
+                100,
+                SystemTime::now(),
+            ));
         }
-        assert!(table.has_enough_probes(), "Table should now have enough probes");
+        assert!(
+            table.has_enough_probes(),
+            "Table should now have enough probes"
+        );
     }
 }
