@@ -1,6 +1,6 @@
 varnishtest "Test prequal director backend selection and health"
 
-server s00 -repeat 12 -listen 127.0.0.1:8080 {
+server s1 -repeat 10 {
 	rxreq
 	expect req.url == "/probe"
 	txresp \
@@ -9,7 +9,7 @@ server s00 -repeat 12 -listen 127.0.0.1:8080 {
 		-body "OK"
 } -start
 
-server s01 -repeat 12 -listen 127.0.0.1:8081 {
+server s2 -repeat 10 {
 	rxreq
 	expect req.url == "/probe"
 	txresp \
@@ -20,12 +20,11 @@ server s01 -repeat 12 -listen 127.0.0.1:8081 {
 
 varnish v1 -vcl+backend {
 	import prequal from "${vmod}";
-	import std;
 
 	sub vcl_init {
 		new dir = prequal.director();
-		dir.add_backend(s00);
-		dir.add_backend(s01);
+		dir.add_backend(s1);
+		dir.add_backend(s2);
 		dir.seed_probes();
 	}
 
@@ -39,6 +38,8 @@ varnish v1 -vcl+backend {
 		set resp.http.healthy = dir.healthy();
 	}
 } -start
+
+delay 0.5
 
 client c1 {
 	txreq -url /probe
@@ -55,6 +56,3 @@ client c2 {
 	expect resp.status == 200
 	expect resp.body ~ "OK"
 } -run
-
-# server s0 -wait
-# server s1 -wait

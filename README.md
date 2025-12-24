@@ -17,28 +17,21 @@ import prequal;
 import prequal from "path/to/libprequal.so";
 ```
 
-### Object `director`
-
-```vcl
-// Create a new instance of the object in your VCL init function
-sub vcl_init {
-    new new = director.new();
-}
-```
+### Constructor `prequal.director()`
 
 Creates a new director instance.
 
 This spawns a background thread that periodically probes backends
 to determine their health and load status.
 
-#### Method `VOID set_probe_path(STRING path)`
+#### Method `VOID <object>.set_probe_path(STRING path)`
 
 Sets the HTTP path used for health check probes.
 
 ##### Arguments
 * `path` - The URL path to use for probe requests (e.g. "/probe")
 
-#### Method `VOID add_backend(BACKEND vcl_backend)`
+#### Method `VOID <object>.add_backend(BACKEND vcl_backend)`
 
 Adds a backend to the director's pool.
 
@@ -49,14 +42,14 @@ Adds a backend to the director's pool.
 * `Ok(())` if the backend was added successfully
 * `Err(VclError)` if the backend was invalid or could not be added
 
-#### Method `VOID remove_backend(BACKEND backend)`
+#### Method `VOID <object>.remove_backend(BACKEND backend)`
 
 Removes a backend from the pool.
 
 ##### Arguments
 * `backend` - The VCL backend to remove
 
-#### Method `BACKEND backend()`
+#### Method `BACKEND <object>.backend()`
 
 Selects the best backend for the current request.
 
@@ -66,18 +59,18 @@ Falls back to random selection if no probe results are available.
 ##### Safety
 This function is marked unsafe because it returns a raw VCL_BACKEND pointer.
 
-#### Method `BOOL healthy()`
+#### Method `BOOL <object>.healthy()`
 
 Checks if the director has any valid probe results.
 
 ##### Returns
 `true` if there are valid probe results, `false` otherwise
 
-#### Method `VOID seed_probes()`
+#### Method `VOID <object>.seed_probes()`
 
 Triggers a probe fetch for every backend.
 
-#### Method `VOID log_probes()`
+#### Method `VOID <object>.log_probes()`
 
 Logs the current state of the probe table for debugging.
 

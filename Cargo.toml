@@ -18,7 +18,7 @@ regex = "1.5"
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 ureq = "2.12.1"
-varnish = {git = "https://github.com/mnutt/varnish-rs", branch = "vcl-backend-arg", features = ["ffi"] }
+varnish = { git = "https://github.com/mnutt/varnish-rs", branch = "vcl-backend-arg-2", features = ["ffi"] }
 
 [build-dependencies]
 cdylib-plugin = "0.1"
