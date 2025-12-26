@@ -278,7 +278,7 @@ mod tests {
         assert_eq!(director.backends.read().unwrap().len(), 2);
 
         // Remove a backend
-        director.remove_backend(VCL_BACKEND(1 as *const director));
+        director.remove_backend(VCL_BACKEND(std::ptr::dangling::<director>()));
         assert_eq!(director.backends.read().unwrap().len(), 1);
 
         // Verify the remaining backend
@@ -361,7 +361,7 @@ mod tests {
     #[test]
     fn test_director_probing() {
         // Create test servers with different loads
-        let servers = vec![
+        let servers = [
             TestServer::new(5, 100),  // Low load
             TestServer::new(10, 200), // Medium load
             TestServer::new(15, 300), // High load

@@ -154,7 +154,7 @@ impl ProbeTable {
     }
 
     pub fn has_probes(&self) -> bool {
-        self.results.lock().unwrap().len() > 0
+        !self.results.lock().unwrap().is_empty()
     }
 
     pub fn remove_stale(&self) {
