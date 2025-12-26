@@ -19,6 +19,7 @@ jobs:
       matrix:
         include:
           - setup: varnish76
+          - setup: varnish80
     env:
       RUST_BACKTRACE: 1
       RUSTDOCFLAGS: -D warnings
