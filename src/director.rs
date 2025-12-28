@@ -264,6 +264,7 @@ mod tests {
         let (director, _) = Director::new();
 
         let backend = create_test_backend("test1", SocketAddr::from(([127, 0, 0, 1], 8080)), 1);
+        let backend1_ref = backend.vcl_backend;
         let backend2 = create_test_backend("test2", SocketAddr::from(([127, 0, 0, 2], 8081)), 2);
 
         // Add backend and verify
@@ -278,7 +279,7 @@ mod tests {
         assert_eq!(director.backends.read().unwrap().len(), 2);
 
         // Remove the first backend
-        director.remove_backend(VCL_BACKEND(1 as *const director));
+        director.remove_backend(backend1_ref);
         assert_eq!(director.backends.read().unwrap().len(), 1);
 
         // Verify the remaining backend
