@@ -125,12 +125,7 @@ impl Backend {
             if family == 2 {
                 // AF_INET
                 let port = ((*data.add(2) as u16) << 8) | (*data.add(3) as u16);
-                let ip = Ipv4Addr::new(
-                    *data.add(4),
-                    *data.add(5),
-                    *data.add(6),
-                    *data.add(7),
-                );
+                let ip = Ipv4Addr::new(*data.add(4), *data.add(5), *data.add(6), *data.add(7));
                 Ok(SocketAddr::new(IpAddr::V4(ip), port))
             } else {
                 Err(BackendError::Address)
