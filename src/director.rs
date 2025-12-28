@@ -277,8 +277,8 @@ mod tests {
         director.add_backend(backend2).unwrap();
         assert_eq!(director.backends.read().unwrap().len(), 2);
 
-        // Remove a backend
-        director.remove_backend(VCL_BACKEND(std::ptr::dangling::<director>()));
+        // Remove the first backend
+        director.remove_backend(VCL_BACKEND(1 as *const director));
         assert_eq!(director.backends.read().unwrap().len(), 1);
 
         // Verify the remaining backend

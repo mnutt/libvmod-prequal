@@ -90,10 +90,51 @@ impl Backend {
         format!("backend_{}", rand::random::<u32>())
     }
 
+    #[cfg(not(test))]
     fn address_from_backend(backend: &backend) -> Result<SocketAddr, BackendError> {
         unsafe {
             let endpoint = (*backend.endpoint).ipv4;
             Option::<SocketAddr>::from(endpoint).ok_or(BackendError::Address)
+        }
+    }
+
+    /// Test-only implementation that parses VCL_IP without calling VSA_GetPtr/VSA_Port,
+    /// which aren't exported from libvarnishapi on Linux.
+    #[cfg(test)]
+    fn address_from_backend(backend: &backend) -> Result<SocketAddr, BackendError> {
+        use std::net::{IpAddr, Ipv4Addr};
+
+        const VSA_MAGIC: u32 = 0x4b1e9335;
+
+        unsafe {
+            let vcl_ip = (*backend.endpoint).ipv4;
+            if vcl_ip.0.is_null() {
+                return Err(BackendError::Address);
+            }
+
+            let ptr = vcl_ip.0 as *const u8;
+            let magic = *(ptr as *const u32);
+            if magic != VSA_MAGIC {
+                return Err(BackendError::Address);
+            }
+
+            // Layout matches create_test_vcl_ip: magic(4) + len(1) + family(1) + port(2) + addr(4)
+            let data = ptr.add(4);
+            let family = *data.add(1);
+
+            if family == 2 {
+                // AF_INET
+                let port = ((*data.add(2) as u16) << 8) | (*data.add(3) as u16);
+                let ip = Ipv4Addr::new(
+                    *data.add(4),
+                    *data.add(5),
+                    *data.add(6),
+                    *data.add(7),
+                );
+                Ok(SocketAddr::new(IpAddr::V4(ip), port))
+            } else {
+                Err(BackendError::Address)
+            }
         }
     }
 }
