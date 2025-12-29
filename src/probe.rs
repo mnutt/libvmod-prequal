@@ -61,9 +61,33 @@ pub fn remove_stale_and_over_used(results: &mut Vec<ProbeResult>) {
         .retain(|p| !p.is_over_used() && now.duration_since(p.timestamp).unwrap() <= MAX_PROBE_AGE);
 }
 
-pub fn remove_worst_probe(results: &mut Vec<ProbeResult>) {
-    // todo: better algorithm
-    results.remove(0);
+/// Removes the worst probe from the pool.
+/// Uses inverse HCL logic: prefer removing hot probes (high RIF) first,
+/// and among those, remove the one with highest latency.
+pub fn remove_worst_probe(results: &mut Vec<ProbeResult>, max_rif: usize) {
+    if results.is_empty() {
+        return;
+    }
+
+    let threshold = (max_rif as f64 * 0.8) as usize;
+
+    // Partition into cold and hot
+    let (cold_indices, hot_indices): (Vec<_>, Vec<_>) = results
+        .iter()
+        .enumerate()
+        .partition(|(_, probe)| probe.rif <= threshold);
+
+    // Prefer removing from hot probes (highest latency first)
+    // Fall back to cold probes if no hot ones exist
+    let worst_idx = hot_indices
+        .iter()
+        .max_by_key(|(_, probe)| probe.est_latency)
+        .or_else(|| cold_indices.iter().max_by_key(|(_, probe)| probe.est_latency))
+        .map(|(idx, _)| *idx);
+
+    if let Some(idx) = worst_idx {
+        results.remove(idx);
+    }
 }
 
 impl ProbeTable {
@@ -82,11 +106,14 @@ impl ProbeTable {
             results.retain(|p| p.backend != result.backend);
 
             results.push(result);
+
+            // Calculate max_rif before removing worst probes
+            let max_rif = results.iter().map(|p| p.rif).max().unwrap_or(0);
+
             while results.len() > PROBE_TABLE_SIZE {
-                remove_worst_probe(&mut results);
+                remove_worst_probe(&mut results, max_rif);
             }
 
-            let max_rif = results.iter().map(|p| p.rif).max().unwrap_or(0);
             self.max_rif.store(max_rif, Ordering::SeqCst);
         }
     }
@@ -275,5 +302,59 @@ mod tests {
             table.has_enough_probes(),
             "Table should now have enough probes"
         );
+    }
+
+    #[test]
+    fn test_remove_worst_probe_prefers_hot_high_latency() {
+        let mut probes = vec![
+            create_test_probe(0, "cold-low-lat", 5, 50, SystemTime::now()),   // cold, low latency
+            create_test_probe(1, "cold-high-lat", 8, 200, SystemTime::now()), // cold, high latency
+            create_test_probe(2, "hot-low-lat", 90, 100, SystemTime::now()),  // hot, low latency
+            create_test_probe(3, "hot-high-lat", 95, 300, SystemTime::now()), // hot, high latency (worst)
+        ];
+
+        let max_rif = 100;
+        remove_worst_probe(&mut probes, max_rif);
+
+        // Should have removed "hot-high-lat" (idx 3)
+        assert_eq!(probes.len(), 3);
+        assert!(
+            probes.iter().all(|p| p.backend.name != "hot-high-lat"),
+            "Should have removed the hot probe with highest latency"
+        );
+    }
+
+    #[test]
+    fn test_remove_worst_probe_falls_back_to_cold_when_no_hot() {
+        let mut probes = vec![
+            create_test_probe(0, "cold-low-lat", 5, 50, SystemTime::now()),   // cold, low latency
+            create_test_probe(1, "cold-high-lat", 8, 200, SystemTime::now()), // cold, high latency (worst)
+            create_test_probe(2, "cold-mid-lat", 10, 100, SystemTime::now()), // cold, mid latency
+        ];
+
+        let max_rif = 100; // threshold = 80, all probes are cold
+        remove_worst_probe(&mut probes, max_rif);
+
+        // Should have removed "cold-high-lat" (highest latency among cold)
+        assert_eq!(probes.len(), 2);
+        assert!(
+            probes.iter().all(|p| p.backend.name != "cold-high-lat"),
+            "Should have removed the cold probe with highest latency"
+        );
+    }
+
+    #[test]
+    fn test_remove_worst_probe_removes_hot_before_cold() {
+        let mut probes = vec![
+            create_test_probe(0, "cold-very-high-lat", 5, 500, SystemTime::now()), // cold, very high latency
+            create_test_probe(1, "hot-low-lat", 90, 50, SystemTime::now()),        // hot, low latency
+        ];
+
+        let max_rif = 100; // threshold = 80
+        remove_worst_probe(&mut probes, max_rif);
+
+        // Should remove the hot probe even though cold has higher latency
+        assert_eq!(probes.len(), 1);
+        assert_eq!(probes[0].backend.name, "cold-very-high-lat");
     }
 }
