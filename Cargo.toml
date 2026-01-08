@@ -31,3 +31,26 @@ crate-type = ["cdylib"]
 [[bin]]
 name = "simulate"
 path = "src/bin/simulate/main.rs"
+
+[package.metadata.deb]
+name = "vmod-prequal"
+maintainer = "Michael Nutt <michael@nuttnet.net>"
+provides = "vmod-prequal"
+conflicts = "vmod-prequal"
+section = "web"
+priority = "optional"
+assets = [
+    ["target/release/libvmod_prequal.so", "usr/lib/varnish/vmods/", "644"],
+]
+extended-description = """
+A Varnish VMOD implementing a new load balancing director designed to minimize
+real-time request latency.
+"""
+
+[package.metadata.deb.variants.varnish77]
+name = "vmod-prequal-varnish77"
+depends = "varnish (>= 7.7.0), varnish (<< 8.0.0)"
+
+[package.metadata.deb.variants.varnish80]
+name = "vmod-prequal-varnish80"
+depends = "varnish (>= 8.0.0), varnish (<< 8.1.0)"

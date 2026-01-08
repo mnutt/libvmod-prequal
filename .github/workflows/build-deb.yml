@@ -1,0 +1,61 @@
+name: build-deb
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-22.04
+          - ubuntu-24.04
+        varnish:
+          - varnish77
+          - varnish80
+    runs-on: ${{ matrix.os }}
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Cache Rust dependencies
+      uses: Swatinem/rust-cache@v2
+      with:
+        prefix-key: ${{ matrix.os }}-${{ matrix.varnish }}
+
+    - name: Install Varnish from packagecloud
+      run: |
+        curl -s https://packagecloud.io/install/repositories/varnishcache/${{ matrix.varnish }}/script.deb.sh | sudo bash
+        sudo apt-get update
+        sudo apt-get install -y varnish varnish-dev
+
+    - name: Install cargo-deb
+      run: cargo install cargo-deb
+
+    - name: Set distro codename
+      run: |
+        DISTRO_CODENAME=$(lsb_release -sc)
+        echo "DISTRO_CODENAME=$DISTRO_CODENAME" >> $GITHUB_ENV
+
+    - name: Build Debian package
+      run: cargo deb --variant=${{ matrix.varnish }}
+
+    - name: Rename package with distro codename
+      run: |
+        cd target/debian
+        ORIG_FILE=$(ls vmod-prequal-${{ matrix.varnish }}_*.deb)
+        NEW_FILE="${ORIG_FILE%.deb}_${DISTRO_CODENAME}.deb"
+        mv "$ORIG_FILE" "$NEW_FILE"
+        echo "DEB_FILE=$NEW_FILE" >> $GITHUB_ENV
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: vmod-prequal-${{ matrix.varnish }}-${{ env.DISTRO_CODENAME }}.deb
+        path: target/debian/${{ env.DEB_FILE }}
