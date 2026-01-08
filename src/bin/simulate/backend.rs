@@ -26,12 +26,7 @@ pub struct SimulatedBackend {
 }
 
 impl SimulatedBackend {
-    pub fn new(
-        id: usize,
-        base_latency_ms: u64,
-        latency_per_rif_ms: u64,
-        capacity: usize,
-    ) -> Self {
+    pub fn new(id: usize, base_latency_ms: u64, latency_per_rif_ms: u64, capacity: usize) -> Self {
         Self {
             id,
             base_latency_ms,

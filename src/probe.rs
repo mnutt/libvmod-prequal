@@ -82,7 +82,11 @@ pub fn remove_worst_probe(results: &mut Vec<ProbeResult>, max_rif: usize) {
     let worst_idx = hot_indices
         .iter()
         .max_by_key(|(_, probe)| probe.est_latency)
-        .or_else(|| cold_indices.iter().max_by_key(|(_, probe)| probe.est_latency))
+        .or_else(|| {
+            cold_indices
+                .iter()
+                .max_by_key(|(_, probe)| probe.est_latency)
+        })
         .map(|(idx, _)| *idx);
 
     if let Some(idx) = worst_idx {
@@ -307,9 +311,9 @@ mod tests {
     #[test]
     fn test_remove_worst_probe_prefers_hot_high_latency() {
         let mut probes = vec![
-            create_test_probe(0, "cold-low-lat", 5, 50, SystemTime::now()),   // cold, low latency
+            create_test_probe(0, "cold-low-lat", 5, 50, SystemTime::now()), // cold, low latency
             create_test_probe(1, "cold-high-lat", 8, 200, SystemTime::now()), // cold, high latency
-            create_test_probe(2, "hot-low-lat", 90, 100, SystemTime::now()),  // hot, low latency
+            create_test_probe(2, "hot-low-lat", 90, 100, SystemTime::now()), // hot, low latency
             create_test_probe(3, "hot-high-lat", 95, 300, SystemTime::now()), // hot, high latency (worst)
         ];
 
@@ -327,7 +331,7 @@ mod tests {
     #[test]
     fn test_remove_worst_probe_falls_back_to_cold_when_no_hot() {
         let mut probes = vec![
-            create_test_probe(0, "cold-low-lat", 5, 50, SystemTime::now()),   // cold, low latency
+            create_test_probe(0, "cold-low-lat", 5, 50, SystemTime::now()), // cold, low latency
             create_test_probe(1, "cold-high-lat", 8, 200, SystemTime::now()), // cold, high latency (worst)
             create_test_probe(2, "cold-mid-lat", 10, 100, SystemTime::now()), // cold, mid latency
         ];
@@ -347,7 +351,7 @@ mod tests {
     fn test_remove_worst_probe_removes_hot_before_cold() {
         let mut probes = vec![
             create_test_probe(0, "cold-very-high-lat", 5, 500, SystemTime::now()), // cold, very high latency
-            create_test_probe(1, "hot-low-lat", 90, 50, SystemTime::now()),        // hot, low latency
+            create_test_probe(1, "hot-low-lat", 90, 50, SystemTime::now()), // hot, low latency
         ];
 
         let max_rif = 100; // threshold = 80

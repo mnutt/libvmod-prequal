@@ -113,7 +113,11 @@ impl PrequalBalancer {
         let worst_idx = hot_indices
             .iter()
             .max_by_key(|(_, probe)| probe.est_latency)
-            .or_else(|| cold_indices.iter().max_by_key(|(_, probe)| probe.est_latency))
+            .or_else(|| {
+                cold_indices
+                    .iter()
+                    .max_by_key(|(_, probe)| probe.est_latency)
+            })
             .map(|(idx, _)| *idx);
 
         if let Some(idx) = worst_idx {

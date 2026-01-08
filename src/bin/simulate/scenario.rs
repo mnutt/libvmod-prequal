@@ -57,7 +57,11 @@ pub enum AntagonistPattern {
 }
 
 /// Runs the antagonist pattern against the backend pool
-pub async fn run_antagonist(pool: Arc<BackendPool>, pattern: AntagonistPattern, duration: Duration) {
+pub async fn run_antagonist(
+    pool: Arc<BackendPool>,
+    pattern: AntagonistPattern,
+    duration: Duration,
+) {
     let start = std::time::Instant::now();
 
     match pattern {
@@ -286,7 +290,7 @@ impl Scenario {
                 intensity: 150,         // 150% extra latency
             },
             Scenario::CorrelatedFailure => AntagonistPattern::CorrelatedSpike {
-                group_size: 10,                        // 10 backends fail together
+                group_size: 10,                       // 10 backends fail together
                 interval: Duration::from_secs(3),     // every 3 seconds
                 duration: Duration::from_millis(500), // for 500ms
                 intensity: 200,                       // 200% extra latency
@@ -301,10 +305,7 @@ impl Scenario {
 
     /// Whether this scenario uses heterogeneous backends
     pub fn is_heterogeneous(&self) -> bool {
-        matches!(
-            self,
-            Scenario::HeterogeneousBackends | Scenario::Realistic
-        )
+        matches!(self, Scenario::HeterogeneousBackends | Scenario::Realistic)
     }
 
     /// Target utilization for this scenario (fraction of capacity)

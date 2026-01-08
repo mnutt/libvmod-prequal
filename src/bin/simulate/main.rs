@@ -175,11 +175,7 @@ async fn run_simulation(
     }
 }
 
-async fn run_scenario(
-    scenario: Scenario,
-    strategy: &str,
-    args: &Args,
-) -> MetricsSummary {
+async fn run_scenario(scenario: Scenario, strategy: &str, args: &Args) -> MetricsSummary {
     // Create backend pool
     let pool = if scenario.is_heterogeneous() {
         Arc::new(BackendPool::heterogeneous(
@@ -210,8 +206,7 @@ async fn run_scenario(
     // Calculate RPS based on utilization target
     let target_rps = if scenario == Scenario::Overload {
         // For overload, exceed capacity
-        let capacity_rps =
-            (args.backends * args.capacity) as f64 / (args.latency as f64 / 1000.0);
+        let capacity_rps = (args.backends * args.capacity) as f64 / (args.latency as f64 / 1000.0);
         (capacity_rps * scenario.target_utilization()) as u64
     } else {
         args.rps
@@ -260,7 +255,10 @@ async fn main() {
         println!("Base latency: {}ms", args.latency);
         println!("Backend capacity: {}", args.capacity);
         println!("Max concurrent: {}", args.max_concurrent);
-        println!("Scenarios: {:?}", scenarios.iter().map(|s| s.name()).collect::<Vec<_>>());
+        println!(
+            "Scenarios: {:?}",
+            scenarios.iter().map(|s| s.name()).collect::<Vec<_>>()
+        );
         println!("Strategies: {:?}", strategies);
         println!();
     }
