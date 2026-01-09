@@ -4,18 +4,86 @@ mod probe;
 #[path = "director.rs"]
 mod prequal_director;
 
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::thread;
 
 pub use backend::Backend;
-pub use prequal_director::Director;
+pub use prequal_director::{Director, DirectorStats};
 use varnish::ffi::VCL_BACKEND;
 use varnish::vcl::{Ctx, LogTag, VclError};
+use varnish::Vsc;
 
 // director is a very thin wrapper around a Director, to expose it to VCL
 #[allow(non_camel_case_types)]
 pub struct director {
     inner: Arc<Director>,
+    // Vsc exposes stats to varnishstat; we sync from Director's Arc<DirectorStats>
+    vsc: Vsc<DirectorStats>,
+}
+
+impl director {
+    /// Syncs stats from Director's Arc<DirectorStats> to Vsc for varnishstat visibility.
+    /// Called on each request to keep varnishstat reasonably up-to-date.
+    fn sync_stats(&self) {
+        let src = self.inner.stats();
+
+        // Sync counters
+        self.vsc
+            .req
+            .store(src.req.load(Ordering::Relaxed), Ordering::Relaxed);
+        self.vsc.selected_from_table.store(
+            src.selected_from_table.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        self.vsc.fallback_random.store(
+            src.fallback_random.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        self.vsc
+            .probes_sent
+            .store(src.probes_sent.load(Ordering::Relaxed), Ordering::Relaxed);
+        self.vsc.probes_success.store(
+            src.probes_success.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        self.vsc
+            .probes_fail
+            .store(src.probes_fail.load(Ordering::Relaxed), Ordering::Relaxed);
+        self.vsc.probes_missing_headers.store(
+            src.probes_missing_headers.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+
+        // Sync gauges (computed in probe loop)
+        self.vsc
+            .backends
+            .store(src.backends.load(Ordering::Relaxed), Ordering::Relaxed);
+        self.vsc.probe_table_size.store(
+            src.probe_table_size.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        self.vsc
+            .probe_p50_rif
+            .store(src.probe_p50_rif.load(Ordering::Relaxed), Ordering::Relaxed);
+        self.vsc
+            .probe_p80_rif
+            .store(src.probe_p80_rif.load(Ordering::Relaxed), Ordering::Relaxed);
+        self.vsc.probe_p50_latency.store(
+            src.probe_p50_latency.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        self.vsc.probe_p80_latency.store(
+            src.probe_p80_latency.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        self.vsc
+            .probe_min_rif
+            .store(src.probe_min_rif.load(Ordering::Relaxed), Ordering::Relaxed);
+        self.vsc
+            .probe_max_rif
+            .store(src.probe_max_rif.load(Ordering::Relaxed), Ordering::Relaxed);
+    }
 }
 
 #[varnish::vmod(docs = "README.md")]
@@ -25,12 +93,17 @@ mod prequal {
     impl director {
         /// Creates a new director instance.
         ///
+        /// # Arguments
+        /// * `name` - A name for this director instance (used in stats naming)
+        ///
         /// This spawns a background thread that periodically probes backends
         /// to determine their health and load status.
-        pub fn new(_ctx: &mut Ctx) -> Result<Self, VclError> {
-            let (inner, probe_loop) = Director::new();
+        pub fn new(_ctx: &mut Ctx, name: &str) -> Result<Self, VclError> {
+            let stats = Arc::new(DirectorStats::default());
+            let vsc = Vsc::<DirectorStats>::new("prequal", name);
+            let (inner, probe_loop) = Director::new(stats);
             thread::spawn(probe_loop);
-            Ok(Self { inner })
+            Ok(Self { inner, vsc })
         }
 
         /// Sets the HTTP path used for health check probes.
@@ -77,10 +150,26 @@ mod prequal {
         pub unsafe fn backend(&self, ctx: &mut Ctx) -> Result<VCL_BACKEND, VclError> {
             self.log_probes(ctx); // just for now, for debugging
 
-            let backend = self
+            let stats = self.inner.stats();
+
+            // Increment request counter
+            stats.req.fetch_add(1, Ordering::Relaxed);
+
+            let (backend, from_table) = self
                 .inner
                 .get_backend()
                 .map_err(|e| VclError::new(format!("Failed to get backend: {:?}", e)))?;
+
+            // Track selection source
+            if from_table {
+                stats.selected_from_table.fetch_add(1, Ordering::Relaxed);
+            } else {
+                stats.fallback_random.fetch_add(1, Ordering::Relaxed);
+            }
+
+            // Sync to Vsc for varnishstat visibility
+            self.sync_stats();
+
             Ok(backend.vcl_backend)
         }
 

@@ -1,12 +1,82 @@
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime};
 
 use rand::seq::IteratorRandom;
 use varnish::ffi::VCL_BACKEND;
+use varnish::VscMetric;
 
 use crate::backend::Backend;
 use crate::probe::{ProbeResult, ProbeTable, PROBE_TABLE_SIZE};
+
+/// Varnish statistics counters for the prequal director.
+/// These are exposed via Varnish's varnishstat tool.
+/// Director owns an Arc<DirectorStats> and updates it directly.
+/// The VCL wrapper syncs these to Vsc for varnishstat visibility.
+#[derive(VscMetric, Default)]
+#[repr(C)]
+pub struct DirectorStats {
+    /// Backend selection requests
+    #[counter]
+    pub req: AtomicU64,
+
+    /// Backends selected from probe table (best available)
+    #[counter]
+    pub selected_from_table: AtomicU64,
+
+    /// Fallback to random backend selection
+    #[counter]
+    pub fallback_random: AtomicU64,
+
+    /// Total probe requests sent
+    #[counter]
+    pub probes_sent: AtomicU64,
+
+    /// Successful probe responses
+    #[counter]
+    pub probes_success: AtomicU64,
+
+    /// Failed probe responses (connection error or non-200)
+    #[counter]
+    pub probes_fail: AtomicU64,
+
+    /// Probes with missing required headers (X-In-Flight or X-Estimated-Latency)
+    #[counter]
+    pub probes_missing_headers: AtomicU64,
+
+    /// Currently registered backends
+    #[gauge]
+    pub backends: AtomicU64,
+
+    /// Current probe table size
+    #[gauge]
+    pub probe_table_size: AtomicU64,
+
+    /// Median (p50) requests-in-flight across probe table
+    #[gauge]
+    pub probe_p50_rif: AtomicU64,
+
+    /// 80th percentile requests-in-flight across probe table
+    #[gauge]
+    pub probe_p80_rif: AtomicU64,
+
+    /// Median (p50) estimated latency (ms) across probe table
+    #[gauge]
+    pub probe_p50_latency: AtomicU64,
+
+    /// 80th percentile estimated latency (ms) across probe table
+    #[gauge]
+    pub probe_p80_latency: AtomicU64,
+
+    /// Minimum requests-in-flight in probe table
+    #[gauge]
+    pub probe_min_rif: AtomicU64,
+
+    /// Maximum requests-in-flight in probe table
+    #[gauge]
+    pub probe_max_rif: AtomicU64,
+}
 
 #[derive(Debug)]
 pub enum DirectorError {
@@ -28,6 +98,7 @@ pub struct Director {
     probe_table: ProbeTable,
     probe_trigger: Sender<()>,
     probe_path: RwLock<String>,
+    stats: Arc<DirectorStats>,
 }
 
 const PROBE_INTERVAL: Duration = Duration::from_secs(5);
@@ -36,10 +107,15 @@ const DEFAULT_PROBE_COUNT: usize = 3;
 impl Director {
     /// Creates a new Director instance along with its probe loop closure.
     ///
+    /// # Arguments
+    /// * `stats` - An Arc<DirectorStats> for recording metrics. The Director
+    ///   will update these stats directly; the caller can share this Arc
+    ///   or sync it to other stats storage (e.g., Vsc for varnishstat).
+    ///
     /// Returns a tuple containing:
     /// - An Arc-wrapped Director instance
     /// - A closure that runs the probe loop when spawned in a thread
-    pub fn new() -> (Arc<Self>, impl FnOnce()) {
+    pub fn new(stats: Arc<DirectorStats>) -> (Arc<Self>, impl FnOnce()) {
         let (tx, rx) = channel();
 
         let inner = Arc::new(Self {
@@ -47,6 +123,7 @@ impl Director {
             probe_table: ProbeTable::new(),
             probe_trigger: tx,
             probe_path: RwLock::new("/probe".to_string()),
+            stats,
         });
 
         let probe_loop = {
@@ -60,6 +137,8 @@ impl Director {
                         // Ensure probe pool every interval
                         director.ensure_probe_pool();
                     }
+                    // Update computed metrics after probing
+                    director.compute_metrics();
                 }
             }
         };
@@ -126,9 +205,9 @@ impl Director {
     /// Falls back to random selection if no probe results are available.
     ///
     /// # Returns
-    /// * `Ok(VCL_BACKEND)` - The selected backend
-    /// * `Err(VclError)` - If no backends are available
-    pub fn get_backend(&self) -> Result<Backend, DirectorError> {
+    /// * `Ok((Backend, bool))` - The selected backend and whether it was from probe table (true) or random fallback (false)
+    /// * `Err(DirectorError)` - If no backends are available
+    pub fn get_backend(&self) -> Result<(Backend, bool), DirectorError> {
         let backends = self
             .backends
             .read()
@@ -143,10 +222,13 @@ impl Director {
         let _ = self.probe_trigger.send(());
 
         if let Some(backend) = self.probe_table.find_best() {
-            Ok(backend)
+            Ok((backend, true))
         } else {
             // Fallback: random selection
-            Ok(backends[rand::random::<usize>() % backends.len()].clone())
+            Ok((
+                backends[rand::random::<usize>() % backends.len()].clone(),
+                false,
+            ))
         }
     }
 
@@ -186,11 +268,13 @@ impl Director {
         };
 
         for backend in backends_to_probe {
+            self.stats.probes_sent.fetch_add(1, Ordering::Relaxed);
             let request = self.construct_probe_request(&backend);
 
             match request.call() {
                 Ok(response) => {
                     if response.status() != 200 {
+                        self.stats.probes_fail.fetch_add(1, Ordering::Relaxed);
                         continue;
                     }
 
@@ -199,7 +283,12 @@ impl Director {
                         .and_then(|s| s.parse::<usize>().ok())
                     {
                         Some(val) => val,
-                        None => continue,
+                        None => {
+                            self.stats
+                                .probes_missing_headers
+                                .fetch_add(1, Ordering::Relaxed);
+                            continue;
+                        }
                     };
 
                     let est_latency = match response
@@ -207,9 +296,15 @@ impl Director {
                         .and_then(|s| s.parse::<usize>().ok())
                     {
                         Some(val) => val,
-                        None => continue,
+                        None => {
+                            self.stats
+                                .probes_missing_headers
+                                .fetch_add(1, Ordering::Relaxed);
+                            continue;
+                        }
                     };
 
+                    self.stats.probes_success.fetch_add(1, Ordering::Relaxed);
                     let now = SystemTime::now();
                     self.probe_table.add_result(ProbeResult::new(
                         now,
@@ -218,7 +313,10 @@ impl Director {
                         backend,
                     ));
                 }
-                Err(_) => continue,
+                Err(_) => {
+                    self.stats.probes_fail.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
             }
         }
     }
@@ -230,6 +328,64 @@ impl Director {
     pub fn is_healthy(&self) -> bool {
         // Only healthy if we have valid probe results
         self.probe_table.has_probes()
+    }
+
+    /// Returns a reference to the stats Arc for syncing to Vsc
+    pub fn stats(&self) -> &Arc<DirectorStats> {
+        &self.stats
+    }
+
+    /// Computes aggregate metrics from the probe table
+    /// Called periodically from the probe loop to update gauges
+    fn compute_metrics(&self) {
+        // Update backend count
+        let backend_count = self.backends.read().map(|b| b.len()).unwrap_or(0);
+        self.stats
+            .backends
+            .store(backend_count as u64, Ordering::Relaxed);
+
+        // Update probe table size
+        let table_size = self.probe_table.len();
+        self.stats
+            .probe_table_size
+            .store(table_size as u64, Ordering::Relaxed);
+
+        // Compute percentiles from probe values
+        if let Some((mut rifs, mut latencies)) = self.probe_table.get_probe_values() {
+            // Sort for percentile computation
+            rifs.sort_unstable();
+            latencies.sort_unstable();
+
+            let len = rifs.len();
+            if len > 0 {
+                // Min/max
+                self.stats
+                    .probe_min_rif
+                    .store(rifs[0] as u64, Ordering::Relaxed);
+                self.stats
+                    .probe_max_rif
+                    .store(rifs[len - 1] as u64, Ordering::Relaxed);
+
+                // p50 (median)
+                let p50_idx = len / 2;
+                self.stats
+                    .probe_p50_rif
+                    .store(rifs[p50_idx] as u64, Ordering::Relaxed);
+                self.stats
+                    .probe_p50_latency
+                    .store(latencies[p50_idx] as u64, Ordering::Relaxed);
+
+                // p80
+                let p80_idx = (len * 80) / 100;
+                let p80_idx = p80_idx.min(len - 1);
+                self.stats
+                    .probe_p80_rif
+                    .store(rifs[p80_idx] as u64, Ordering::Relaxed);
+                self.stats
+                    .probe_p80_latency
+                    .store(latencies[p80_idx] as u64, Ordering::Relaxed);
+            }
+        }
     }
 
     fn ensure_probe_pool(&self) {
@@ -261,7 +417,8 @@ mod tests {
 
     #[test]
     fn test_director_add_remove_backend() {
-        let (director, _) = Director::new();
+        let stats = Arc::new(DirectorStats::default());
+        let (director, _) = Director::new(stats);
 
         let backend = create_test_backend("test1", SocketAddr::from(([127, 0, 0, 1], 8080)), 1);
         let backend1_ref = backend.vcl_backend;
@@ -292,10 +449,11 @@ mod tests {
 
     #[test]
     fn test_director_get_backend() {
-        let (director, _) = Director::new();
+        let stats = Arc::new(DirectorStats::default());
+        let (director, _) = Director::new(stats);
         let backend = create_test_backend("test1", SocketAddr::from(([127, 0, 0, 1], 8080)), 1);
         director.add_backend(backend).unwrap();
-        let backend = director.get_backend().unwrap();
+        let (backend, _from_table) = director.get_backend().unwrap();
         assert_eq!(backend.name, "test1");
     }
 
@@ -368,29 +526,35 @@ mod tests {
             TestServer::new(15, 300), // High load
         ];
 
-        // Create and configure director
-        let (director, probe_loop) = Director::new();
-        let _probe_thread = thread::spawn(probe_loop);
+        let stats = Arc::new(DirectorStats::default());
+        let (director, probe_loop) = Director::new(stats);
 
-        // Add backends
-        for (idx, server) in servers.iter().enumerate() {
-            let backend = create_test_backend(&format!("test{}", idx), server.addr, idx as u32);
-            director.add_backend(backend).unwrap();
-        }
+        thread::scope(|s| {
+            s.spawn(probe_loop);
 
-        director.trigger_probe();
+            // Add backends
+            for (idx, server) in servers.iter().enumerate() {
+                let backend = create_test_backend(&format!("test{}", idx), server.addr, idx as u32);
+                director.add_backend(backend).unwrap();
+            }
 
-        // Wait for probes to complete
-        thread::sleep(Duration::from_secs(2));
+            director.trigger_probe();
 
-        // Verify probe results
-        if let Some(table) = director.debug_probe_table() {
-            println!("Probe table:\n{}", table);
-        }
+            // Wait for probes to complete
+            thread::sleep(Duration::from_secs(2));
 
-        // The director should prefer the backend with lowest in_flight count
-        let selected = director.get_backend().unwrap();
-        assert_eq!(selected.address, servers[0].addr); // Should select the least loaded server
+            // Verify probe results
+            if let Some(table) = director.debug_probe_table() {
+                println!("Probe table:\n{}", table);
+            }
+
+            // The director should prefer the backend with lowest in_flight count
+            let (selected, _from_table) = director.get_backend().unwrap();
+            assert_eq!(selected.address, servers[0].addr);
+
+            // Drop director so probe loop can exit and scope can complete
+            drop(director);
+        });
     }
 
     #[test]
@@ -403,48 +567,55 @@ mod tests {
             ));
         }
 
-        let (director, probe_loop) = Director::new();
-        let _probe_thread = thread::spawn(probe_loop);
+        let stats = Arc::new(DirectorStats::default());
+        let (director, probe_loop) = Director::new(stats);
 
-        for (idx, server) in servers.iter().enumerate() {
-            let backend = create_test_backend(&format!("test{}", idx), server.addr, idx as u32);
-            director.add_backend(backend).unwrap();
-        }
+        thread::scope(|s| {
+            s.spawn(probe_loop);
 
-        director.trigger_probe();
-        thread::sleep(Duration::from_secs(1));
-
-        if let Some(table) = director.debug_probe_table() {
-            println!("Probe table at beginning: \n{}", table);
-        }
-
-        for i in 0..1000 {
-            let backend = director.get_backend().unwrap();
-            assert!(
-                backend.name.starts_with("test"),
-                "Backend name should start with 'test'"
-            );
-
-            if i > 0 && i % 100 == 0 {
-                if let Some(table) = director.debug_probe_table() {
-                    println!("Probe table at request {}: \n{}", i, table);
-                }
-
-                assert!(
-                    director.probe_table.has_enough_probes(),
-                    "Probe table should be at least half full at request {} but had {}",
-                    i,
-                    director.probe_table.len()
-                );
+            for (idx, server) in servers.iter().enumerate() {
+                let backend = create_test_backend(&format!("test{}", idx), server.addr, idx as u32);
+                director.add_backend(backend).unwrap();
             }
 
-            // sleep for a bit in between requests
-            thread::sleep(Duration::from_millis(2));
-        }
+            director.trigger_probe();
+            thread::sleep(Duration::from_secs(1));
 
-        assert!(
-            director.probe_table.has_enough_probes(),
-            "Probe table should be sufficiently full after test"
-        );
+            if let Some(table) = director.debug_probe_table() {
+                println!("Probe table at beginning: \n{}", table);
+            }
+
+            for i in 0..1000 {
+                let (backend, _from_table) = director.get_backend().unwrap();
+                assert!(
+                    backend.name.starts_with("test"),
+                    "Backend name should start with 'test'"
+                );
+
+                if i > 0 && i % 100 == 0 {
+                    if let Some(table) = director.debug_probe_table() {
+                        println!("Probe table at request {}: \n{}", i, table);
+                    }
+
+                    assert!(
+                        director.probe_table.has_enough_probes(),
+                        "Probe table should be at least half full at request {} but had {}",
+                        i,
+                        director.probe_table.len()
+                    );
+                }
+
+                // sleep for a bit in between requests
+                thread::sleep(Duration::from_millis(2));
+            }
+
+            assert!(
+                director.probe_table.has_enough_probes(),
+                "Probe table should be sufficiently full after test"
+            );
+
+            // Drop director so probe loop can exit and scope can complete
+            drop(director);
+        });
     }
 }

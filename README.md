@@ -17,9 +17,12 @@ import prequal;
 import prequal from "path/to/libprequal.so";
 ```
 
-### Constructor `prequal.director()`
+### Constructor `prequal.director(STRING name)`
 
 Creates a new director instance.
+
+##### Arguments
+* `name` - A name for this director instance (used in stats naming)
 
 This spawns a background thread that periodically probes backends
 to determine their health and load status.

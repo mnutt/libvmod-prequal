@@ -210,6 +210,17 @@ impl ProbeTable {
         let pool_size = self.len();
         pool_size >= PROBE_TABLE_SIZE / 2
     }
+
+    /// Returns vectors of (rif, latency) values from all probes for computing metrics
+    pub fn get_probe_values(&self) -> Option<(Vec<usize>, Vec<usize>)> {
+        let results = self.results.lock().ok()?;
+        if results.is_empty() {
+            return None;
+        }
+        let rifs: Vec<usize> = results.iter().map(|p| p.rif).collect();
+        let latencies: Vec<usize> = results.iter().map(|p| p.est_latency).collect();
+        Some((rifs, latencies))
+    }
 }
 
 #[cfg(test)]
