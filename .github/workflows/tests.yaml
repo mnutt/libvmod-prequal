@@ -13,9 +13,9 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        include:
-          - setup: varnish76
-          - setup: varnish80
+        varnish:
+          - varnish76
+          - varnish80
     env:
       RUST_BACKTRACE: 1
       RUSTDOCFLAGS: -D warnings
@@ -29,8 +29,10 @@ jobs:
         run: just check-if-published
       - uses: Swatinem/rust-cache@v2
         if: github.event_name != 'release' && github.event_name != 'workflow_dispatch'
+        with:
+          prefix-key: ${{ matrix.varnish }}
       - name: install varnish-dev
         run: |
-          curl -s https://packagecloud.io/install/repositories/varnishcache/${{ matrix.setup }}/script.deb.sh | sudo bash
+          curl -s https://packagecloud.io/install/repositories/varnishcache/${{ matrix.varnish }}/script.deb.sh | sudo bash
           sudo apt-get install -y varnish-dev
       - run: just -v ci-test
