@@ -12,7 +12,7 @@ use crate::probe::{ProbeResult, ProbeTable, PROBE_TABLE_SIZE};
 
 /// Varnish statistics counters for the prequal director.
 /// These are exposed via Varnish's varnishstat tool.
-/// Director owns an Arc<DirectorStats> and updates it directly.
+/// Director owns an `Arc<DirectorStats>` and updates it directly.
 /// The VCL wrapper syncs these to Vsc for varnishstat visibility.
 #[derive(VscMetric, Default)]
 #[repr(C)]
@@ -108,7 +108,7 @@ impl Director {
     /// Creates a new Director instance along with its probe loop closure.
     ///
     /// # Arguments
-    /// * `stats` - An Arc<DirectorStats> for recording metrics. The Director
+    /// * `stats` - An `Arc<DirectorStats>` for recording metrics. The Director
     ///   will update these stats directly; the caller can share this Arc
     ///   or sync it to other stats storage (e.g., Vsc for varnishstat).
     ///
